@@ -1,11 +1,37 @@
-.DS_Store
-node_modules/
+# Python
 __pycache__/
-*.pyc
-.env
+*.py[cod]
+*$py.class
+*.so
+.Python
 .venv/
 venv/
+env/
 dist/
 build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# macOS / editors
+.DS_Store
 .idea/
 .vscode/
+*.swp
+
+# Logs / artifacts
+*.log
+logs/
+
+# Node (just in case — not used, but harmless)
+node_modules/
+
+# uv — keep uv.lock committed, ignore cache
+# (uv.lock is intentionally tracked so Railway builds are reproducible)

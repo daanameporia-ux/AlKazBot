@@ -1,0 +1,17 @@
+# Railway deployment configuration.
+# Docs: https://docs.railway.app/reference/config-as-code
+#
+# Build uses the Dockerfile at repo root (uv-based).
+# On deploy Railway injects $PORT and $DATABASE_URL automatically if a
+# PostgreSQL service is attached to this service. Everything else — in Variables.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Alembic migrations run on every deploy, then the bot starts (long-polling).
+startCommand = "uv run alembic upgrade head && uv run python -m src.bot.main"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+healthcheckTimeout = 30
