@@ -16,6 +16,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot.batcher import Batch
+from src.bot.middlewares.logging import log_bot_reply
 from src.core.pending_ops import PendingOp, get_registry
 from src.core.preview import render as render_preview
 from src.db.repositories import knowledge as kb_repo
@@ -91,10 +92,16 @@ def make_flush_handler(bot: Bot):
             )
             if batch.trigger is not None and analysis.chat_reply:
                 try:
-                    await bot.send_message(
+                    sent = await bot.send_message(
                         chat_id=batch.chat_id,
                         text=analysis.chat_reply,
                         reply_to_message_id=batch.trigger.tg_message_id,
+                    )
+                    await log_bot_reply(
+                        chat_id=batch.chat_id,
+                        tg_message_id=sent.message_id,
+                        text=analysis.chat_reply,
+                        intent_hint="chat_reply",
                     )
                 except Exception:
                     log.exception("chat_reply_send_failed")
@@ -129,6 +136,12 @@ def make_flush_handler(bot: Bot):
                     reply_markup=_confirm_kb(entry.uid),
                 )
                 await registry.attach_preview(entry.uid, sent.message_id)
+                await log_bot_reply(
+                    chat_id=batch.chat_id,
+                    tg_message_id=sent.message_id,
+                    text=f"[preview {op.intent.value}] {op.summary}",
+                    intent_hint=op.intent.value,
+                )
             except Exception:
                 log.exception("preview_send_failed", intent=op.intent.value)
 

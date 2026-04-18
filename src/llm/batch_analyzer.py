@@ -32,8 +32,11 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
 from src.bot.batcher import Batch
+from src.db.models import MessageLog
+from src.db.session import session_scope
 from src.llm.client import complete
 from src.llm.schemas import Intent
 from src.llm.system_prompt import build_system_blocks
@@ -246,14 +249,59 @@ def _format_batch(batch: Batch) -> str:
     return "\n".join(parts) if parts else "(empty batch)"
 
 
+RECENT_HISTORY_WINDOW = 30
+
+
+async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
+    """Pull last N messages from message_log (including bot replies) so the
+    analyzer has conversation context. Messages that are already part of
+    the current batch are excluded to avoid double-quoting.
+    """
+    async with session_scope() as session:
+        res = await session.execute(
+            select(MessageLog)
+            .where(MessageLog.chat_id == chat_id)
+            .order_by(MessageLog.id.desc())
+            .limit(RECENT_HISTORY_WINDOW)
+        )
+        rows = list(res.scalars().all())
+    rows.reverse()  # chronological ascending
+    lines: list[str] = []
+    for r in rows:
+        if r.tg_message_id and r.tg_message_id in exclude_ids:
+            continue
+        if not r.text:
+            continue
+        who = "бот" if r.is_bot else (str(r.tg_user_id) if r.tg_user_id else "?")
+        lines.append(f"  [id={r.tg_message_id}] {who}: {r.text[:500]}")
+    if not lines:
+        return ""
+    return "# Контекст чата (последние сообщения)\n" + "\n".join(lines)
+
+
 async def analyze_batch(
     batch: Batch,
     *,
     knowledge_items: list[dict] | None = None,
 ) -> BatchAnalysis:
-    system_blocks = build_system_blocks(knowledge_items=knowledge_items)
     rendered = _format_batch(batch)
-    user_prompt = f"{BATCH_INSTRUCTION}\n\nMessages:\n{rendered}"
+
+    # Pull conversation history — everything except the messages that are
+    # already inside `batch` (the analyzer would otherwise see them twice).
+    batch_ids: set[int] = set()
+    if batch.trigger:
+        batch_ids.add(batch.trigger.tg_message_id)
+    batch_ids.update(m.tg_message_id for m in batch.messages)
+    recent_history = await _recent_history(batch.chat_id, batch_ids)
+
+    # `recent_history` is the non-cached 4th system block — it changes every
+    # request, so we keep the first 3 blocks cached and put history here.
+    system_blocks = build_system_blocks(
+        knowledge_items=knowledge_items,
+        recent_messages=recent_history or None,
+    )
+
+    user_prompt = f"{BATCH_INSTRUCTION}\n\nMessages to analyze now:\n{rendered}"
 
     resp = await complete(
         system_blocks=system_blocks,

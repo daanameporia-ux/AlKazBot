@@ -61,3 +61,38 @@ class MessageLoggingMiddleware(BaseMiddleware):
                 is_mention=False,  # set later in handler once we know
             )
             session.add(entry)
+
+
+async def log_bot_reply(
+    *,
+    chat_id: int,
+    tg_message_id: int | None,
+    text: str,
+    intent_hint: str | None = None,
+) -> None:
+    """Persist the bot's own outgoing messages so the analyzer sees them in
+    recent history (otherwise the LLM thinks it never answered).
+
+    Called from batch_processor / callbacks after bot.send_message /
+    edit_text, with the resulting message_id.
+    """
+    async with session_scope() as session:
+        existing = await session.execute(
+            select(MessageLog.id).where(
+                MessageLog.tg_message_id == tg_message_id,
+                MessageLog.chat_id == chat_id,
+            )
+        )
+        if existing.first() is not None:
+            return
+        entry = MessageLog(
+            tg_message_id=tg_message_id,
+            tg_user_id=None,
+            chat_id=chat_id,
+            text=text,
+            has_media=False,
+            is_bot=True,
+            is_mention=False,
+            intent_detected=intent_hint,
+        )
+        session.add(entry)
