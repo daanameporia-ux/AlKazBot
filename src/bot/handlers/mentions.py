@@ -33,10 +33,11 @@ REMEMBER_RE = re.compile(
 
 
 async def _addressed_to_me(message: Message) -> bool:
-    """True when the user is talking to the bot — either by @-mention in text
-    or by Telegram-level reply to one of the bot's own messages.
+    """True when the user is talking to the bot — either by @-mention in text,
+    by classic reply (`reply_to_message`) to one of the bot's messages, or by
+    Bot-API-7.0+ external reply / quote pointing at the bot.
 
-    A reply thread IS an explicit form of address: it's equivalent to tagging.
+    A reply thread — in any shape Telegram encodes it — IS explicit address.
     """
     me = await message.bot.me()
     text = message.text or message.caption or ""
@@ -44,23 +45,18 @@ async def _addressed_to_me(message: Message) -> bool:
     mention = bool(text and f"@{me.username}".lower() in text_lower)
 
     rpy = message.reply_to_message
-    reply_to_bot = bool(
-        rpy and rpy.from_user and rpy.from_user.id == me.id
-    )
+    reply_to_bot = bool(rpy and rpy.from_user and rpy.from_user.id == me.id)
 
-    log.info(
-        "addressed_probe",
-        mention=mention,
-        reply_to_bot=reply_to_bot,
-        has_reply=bool(rpy),
-        reply_from_id=(rpy.from_user.id if rpy and rpy.from_user else None),
-        reply_from_is_bot=(rpy.from_user.is_bot if rpy and rpy.from_user else None),
-        me_id=me.id,
-        me_username=me.username,
-        text_preview=text[:80],
-    )
+    # Bot API 7.0 — external reply / quote (used when Telegram encodes
+    # replies to out-of-history messages or "reply with quote" UX).
+    ext = getattr(message, "external_reply", None)
+    ext_sender = None
+    if ext is not None:
+        origin = getattr(ext, "origin", None)
+        ext_sender = getattr(origin, "sender_user", None) if origin else None
+    ext_reply_to_bot = bool(ext_sender and ext_sender.id == me.id)
 
-    return mention or reply_to_bot
+    return mention or reply_to_bot or ext_reply_to_bot
 
 
 def _strip_mention(text: str, bot_username: str) -> str:
@@ -69,10 +65,21 @@ def _strip_mention(text: str, bot_username: str) -> str:
 
 @router.message()
 async def on_mention(message: Message) -> None:
+    # Verbose diagnostic dump — Telegram has three reply-ish fields since
+    # Bot API 7.0 (reply_to_message, external_reply, quote). We want to see
+    # exactly which one (if any) is populated.
+    ext = getattr(message, "external_reply", None)
+    quote = getattr(message, "quote", None)
     print(
         f"[mentions] entered: chat={message.chat.id} "
         f"user={message.from_user.id if message.from_user else '?'} "
         f"has_reply={message.reply_to_message is not None} "
+        f"reply_from_id={(message.reply_to_message.from_user.id if message.reply_to_message and message.reply_to_message.from_user else None)} "
+        f"reply_from_is_bot={(message.reply_to_message.from_user.is_bot if message.reply_to_message and message.reply_to_message.from_user else None)} "
+        f"has_ext_reply={ext is not None} "
+        f"ext_origin_sender_is_bot={(getattr(ext.origin, 'sender_user', None).is_bot if ext and getattr(ext, 'origin', None) and getattr(ext.origin, 'sender_user', None) else None)} "
+        f"has_quote={quote is not None} "
+        f"thread_id={message.message_thread_id} "
         f"text={(message.text or '')[:60]!r}",
         flush=True,
     )
