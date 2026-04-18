@@ -32,12 +32,22 @@ REMEMBER_RE = re.compile(
 )
 
 
-async def _is_mention_of_me(message: Message) -> bool:
+async def _addressed_to_me(message: Message) -> bool:
+    """True when the user is talking to the bot — either by @-mention in text
+    or by Telegram-level reply to one of the bot's own messages.
+
+    A reply thread IS an explicit form of address: it's equivalent to tagging.
+    """
     me = await message.bot.me()
+    # @-mention in text / caption
     text = message.text or message.caption or ""
-    if not text:
-        return False
-    return f"@{me.username}".lower() in text.lower()
+    if text and f"@{me.username}".lower() in text.lower():
+        return True
+    # Reply to bot's own message
+    rpy = message.reply_to_message
+    if rpy and rpy.from_user and rpy.from_user.id == me.id:
+        return True
+    return False
 
 
 def _strip_mention(text: str, bot_username: str) -> str:
@@ -46,15 +56,21 @@ def _strip_mention(text: str, bot_username: str) -> str:
 
 @router.message()
 async def on_mention(message: Message) -> None:
-    if not await _is_mention_of_me(message):
+    if not await _addressed_to_me(message):
         return
 
     me = await message.bot.me()
     raw = message.text or message.caption or ""
     body = _strip_mention(raw, me.username or "")
+    is_reply = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.id == me.id
+    )
 
     log.info(
         "mention_received",
+        via="reply" if is_reply else "at_mention",
         text_preview=body[:120],
         user_id=message.from_user.id if message.from_user else None,
         chat_id=message.chat.id,
