@@ -28,7 +28,9 @@ router = Router(name="mentions")
 
 
 REMEMBER_RE = re.compile(
-    r"(?ix)\bзапомни[\s,:]*(что)?\s*[:\-]?\s*(?P<body>.+)",
+    # DOTALL so the fact body can span multiple lines (users type explanations
+    # with line breaks all the time). `\s*` chews opening punctuation/colons.
+    r"(?isx)\bзапомни\b[\s,:]*(что)?[\s,:\-]*(?P<body>.+?)\s*$",
 )
 
 
@@ -98,8 +100,9 @@ async def on_mention(message: Message) -> None:
         await message.reply("Чё?")
         return
 
-    # Fast-path: explicit teach command.
-    teach = REMEMBER_RE.match(body)
+    # Fast-path: explicit teach command. `search()` — body may have a leading
+    # newline after the @-mention was stripped, so .match() wouldn't hit.
+    teach = REMEMBER_RE.search(body)
     if teach:
         fact = teach.group("body").strip().rstrip(".")
         if len(fact) < 3:
