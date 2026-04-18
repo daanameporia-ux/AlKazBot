@@ -36,3 +36,4 @@ node_modules/
 # uv — keep uv.lock committed, ignore cache
 # (uv.lock is intentionally tracked so Railway builds are reproducible)
 .scratch/
+*.pdf
