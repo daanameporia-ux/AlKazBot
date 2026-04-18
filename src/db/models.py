@@ -22,6 +22,9 @@ from sqlalchemy import (
     Text,
     func,
 )
+from sqlalchemy import (
+    LargeBinary as sa_LargeBinary,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -442,6 +445,31 @@ class PendingOperation(Base):
     )
     status: Mapped[str] = mapped_column(Text, default="pending", nullable=False)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VoiceMessage(Base):
+    """Voice notes captured from the chat — stored as raw OGG bytes until
+    someone (in a Claude Code session) runs the transcription script that
+    fills `transcribed_text`. After transcription the text flows through
+    the normal batch analyzer so operations get their preview cards.
+    """
+
+    __tablename__ = "voice_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tg_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    tg_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    duration_sec: Mapped[int | None] = mapped_column(Integer)
+    mime_type: Mapped[str | None] = mapped_column(Text)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    ogg_data: Mapped[bytes] = mapped_column(sa_LargeBinary, nullable=False)
+    transcribed_text: Mapped[str | None] = mapped_column(Text)
+    transcribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    analyzed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
 
 
 class SeenSticker(Base):

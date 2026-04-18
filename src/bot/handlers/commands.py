@@ -551,6 +551,22 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@router.message(Command("voices"))
+async def cmd_voices(message: Message) -> None:
+    """Show count of voice messages awaiting transcription."""
+    from src.db.repositories import voice as voice_repo
+
+    async with session_scope() as session:
+        pending = await voice_repo.count_pending(session)
+    if pending == 0:
+        await message.answer("Нет нерасшифрованных голосовых.")
+        return
+    await message.answer(
+        f"В очереди <b>{pending}</b> нерасшифрованных голосовых. "
+        "Скажи Claude в сессии «расшифруй голосовые» — я обработаю."
+    )
+
+
 @router.message(Command("silent"))
 async def cmd_silent(message: Message, command: CommandObject) -> None:
     from src.core import silent

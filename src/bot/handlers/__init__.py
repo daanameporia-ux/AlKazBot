@@ -11,6 +11,7 @@ from src.bot.handlers import (
     messages,
     photo,
     stickers,
+    voice,
 )
 
 router = Router(name="root")
@@ -20,6 +21,7 @@ router.include_router(callbacks.router)
 router.include_router(admin.router)
 router.include_router(documents.router)
 router.include_router(photo.router)
+router.include_router(voice.router)
 router.include_router(stickers.router)
 # Catch-all — must be last so specific routers get first pick.
 router.include_router(messages.router)

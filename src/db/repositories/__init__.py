@@ -22,6 +22,7 @@ from src.db.repositories import (
     snapshots,
     stickers,
     users,
+    voice,
     wallets,
 )
 
@@ -42,5 +43,6 @@ __all__ = [
     "snapshots",
     "stickers",
     "users",
+    "voice",
     "wallets",
 ]
