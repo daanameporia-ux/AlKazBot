@@ -100,8 +100,11 @@ def main() -> None:
             print(f"    → {text[:120]}")
 
             with conn.cursor() as cur:
+                # Save transcript + WIPE the OGG bytes — once we have the text
+                # we don't need the audio anymore (PII + disk pressure).
                 cur.execute(
-                    "UPDATE voice_messages SET transcribed_text=%s, transcribed_at=%s "
+                    "UPDATE voice_messages "
+                    "SET transcribed_text=%s, transcribed_at=%s, ogg_data=''::bytea "
                     "WHERE id=%s",
                     (text, datetime.now(UTC), vid),
                 )

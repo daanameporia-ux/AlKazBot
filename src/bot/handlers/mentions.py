@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.types import Message
 
 from src.bot.batcher import BufferedMessage, get_batch_buffer, is_main_group, now_ts
@@ -56,7 +56,10 @@ def _strip_mention(text: str, bot_username: str) -> str:
     return re.sub(rf"(?i)@{re.escape(bot_username)}", "", text).strip()
 
 
-@router.message()
+# Filter on text/caption only — otherwise this catch-all handler
+# short-circuits routing before voice/photo/document/sticker routers get a
+# chance to fire.
+@router.message(F.text | F.caption)
 async def on_mention(message: Message) -> None:
     if not await _addressed_to_me(message):
         return

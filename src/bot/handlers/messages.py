@@ -7,7 +7,7 @@ analyzed in bulk. Non-main chats and non-text messages are ignored.
 
 from __future__ import annotations
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.types import Message
 
 from src.bot.batcher import BufferedMessage, get_batch_buffer, is_main_group, now_ts
@@ -22,7 +22,9 @@ def _is_whitelisted(user_id: int) -> bool:
     return user_id in settings.allowed_tg_user_ids
 
 
-@router.message()
+# Text/caption only — other media types (voice/photo/document/sticker) are
+# owned by their own routers.
+@router.message(F.text | F.caption)
 async def on_message(message: Message) -> None:
     if message.from_user is None or message.from_user.is_bot:
         return
