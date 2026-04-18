@@ -476,7 +476,21 @@ async def cmd_history(message: Message, command: CommandObject) -> None:
 async def cmd_undo(message: Message, command: CommandObject) -> None:
     if message.from_user is None:
         return
+    from sqlalchemy import delete, select
+
     from src.config import settings as _s
+    from src.db.models import (
+        AuditLog,
+        Cabinet,
+        Exchange,
+        Expense,
+        KnowledgeBase,
+        PartnerContribution,
+        PartnerWithdrawal,
+        PoAWithdrawal,
+        Prepayment,
+    )
+    from src.db.repositories import audit as audit_repo
 
     try:
         audit_id = int((command.args or "").strip())
@@ -485,16 +499,11 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
         return
     is_owner = message.from_user.id == _s.owner_tg_user_id
     async with session_scope() as session:
-        from sqlalchemy import delete, select
-
-        from src.db.models import AuditLog
-
         res = await session.execute(select(AuditLog).where(AuditLog.id == audit_id))
         entry = res.scalar_one_or_none()
         if entry is None:
             await message.reply(f"Нет записи #{audit_id} в аудите.")
             return
-        # Ownership check: caller is owner OR was the creator of the operation
         creator_user_id = entry.user_id
         me = await user_repo.get_user_by_tg_id(session, message.from_user.id)
         me_user_id = me.id if me else None
@@ -506,19 +515,8 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
                 f"Откат '{entry.action}' ещё не реализован. Пока умею только create."
             )
             return
-        # Best-effort delete by table + record_id (hard delete; audit row
-        # stays for trace).
         table = entry.table_name
         rid = entry.record_id
-        from src.db.models import (
-            Cabinet,
-            Exchange,
-            Expense,
-            PartnerContribution,
-            PartnerWithdrawal,
-            PoAWithdrawal,
-            Prepayment,
-        )
         table_map = {
             "exchanges": Exchange,
             "expenses": Expense,
@@ -527,12 +525,24 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
             "poa_withdrawals": PoAWithdrawal,
             "cabinets": Cabinet,
             "prepayments": Prepayment,
+            "knowledge_base": KnowledgeBase,
         }
         model = table_map.get(table)
         if model is None or rid is None:
             await message.reply(f"Не знаю как откатить таблицу `{table}`.")
             return
         await session.execute(delete(model).where(model.id == rid))
+        # Trail: record the rollback itself as a separate audit row so
+        # /history shows both the create and the undo.
+        await audit_repo.log(
+            session,
+            user_id=me_user_id,
+            action="undo",
+            table_name=table,
+            record_id=rid,
+            old_data=entry.new_data,
+            new_data={"reverted_audit_id": audit_id},
+        )
     await message.reply(f"Откатил аудит #{audit_id} ({table} #{rid}).")
 
 
@@ -542,8 +552,29 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
 
 
 @router.message(Command("silent"))
-async def cmd_silent(message: Message) -> None:
-    await message.reply("/silent — скоро будет в Этапе 3.")
+async def cmd_silent(message: Message, command: CommandObject) -> None:
+    from src.core import silent
+
+    args = (command.args or "").strip().lower()
+    if args in ("off", "выкл", "вкл"):
+        silent.clear_silent()
+        await message.reply("Ок, снова разговариваю.")
+        return
+    # Accept "on", "on 2", "2h" etc.
+    hours = 2.0
+    tok = args.replace("on", "").replace("вкл", "").strip().rstrip("hч") or ""
+    if tok:
+        try:
+            hours = max(0.1, min(24.0, float(tok.replace(",", "."))))
+        except ValueError:
+            await message.reply(
+                "Формат: <code>/silent on</code>, <code>/silent on 3</code>, <code>/silent off</code>."
+            )
+            return
+    until = silent.set_silent(hours)
+    await message.reply(
+        f"Молчу до {until.strftime('%H:%M UTC')} ({hours:.1f}ч)."
+    )
 
 
 # --------------------------------------------------------------------------- #

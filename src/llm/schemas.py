@@ -14,7 +14,7 @@ class Intent(StrEnum):
     CABINET_PURCHASE = "cabinet_purchase"
     CABINET_WORKED_OUT = "cabinet_worked_out"
     CABINET_BLOCKED = "cabinet_blocked"
-    CABINET_RECOVERED = "cabinet_recovered"
+    CABINET_RECOVERED = "cabinet_recovered"  # blocked → recovered через нотариалку
     PREPAYMENT_GIVEN = "prepayment_given"
     PREPAYMENT_FULFILLED = "prepayment_fulfilled"
     EXPENSE = "expense"

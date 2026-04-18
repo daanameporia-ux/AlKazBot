@@ -53,6 +53,10 @@ async def on_confirm(q: CallbackQuery) -> None:
             reply_text = await apply(
                 session, op, created_by_tg_id=q.from_user.id
             )
+            # Save as a verified few-shot example for future LLM runs.
+            from src.core.applier import _record_verified
+
+            await _record_verified(session, op)
     except ApplyError as e:
         log.warning("apply_error", uid=uid, error=str(e))
         # Put the op back for correction — user can press cancel or we can

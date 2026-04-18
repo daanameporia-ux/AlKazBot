@@ -36,6 +36,7 @@ from sqlalchemy import select
 
 from src.bot.batcher import Batch
 from src.db.models import MessageLog
+from src.db.repositories import few_shot as few_shot_repo
 from src.db.session import session_scope
 from src.llm.client import complete
 from src.llm.schemas import Intent
@@ -250,6 +251,35 @@ def _format_batch(batch: Batch) -> str:
 
 
 RECENT_HISTORY_WINDOW = 30
+FEW_SHOT_PER_INTENT = 2
+FEW_SHOT_INTENTS = (
+    Intent.POA_WITHDRAWAL,
+    Intent.EXCHANGE,
+    Intent.EXPENSE,
+    Intent.PARTNER_WITHDRAWAL,
+    Intent.PARTNER_DEPOSIT,
+    Intent.CABINET_PURCHASE,
+    Intent.CABINET_WORKED_OUT,
+    Intent.WALLET_SNAPSHOT,
+)
+
+
+async def _collect_few_shot() -> list[dict[str, Any]]:
+    async with session_scope() as session:
+        out: list[dict[str, Any]] = []
+        for intent in FEW_SHOT_INTENTS:
+            rows = await few_shot_repo.list_for_intent(
+                session, intent.value, limit=FEW_SHOT_PER_INTENT
+            )
+            for r in rows:
+                out.append(
+                    {
+                        "intent": r.intent,
+                        "input_text": r.input_text,
+                        "parsed_json": r.parsed_json,
+                    }
+                )
+    return out
 
 
 async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
@@ -294,10 +324,14 @@ async def analyze_batch(
     batch_ids.update(m.tg_message_id for m in batch.messages)
     recent_history = await _recent_history(batch.chat_id, batch_ids)
 
+    # Pull a mix of verified examples across the most likely intents.
+    few_shot_items = await _collect_few_shot()
+
     # `recent_history` is the non-cached 4th system block — it changes every
     # request, so we keep the first 3 blocks cached and put history here.
     system_blocks = build_system_blocks(
         knowledge_items=knowledge_items,
+        few_shot_examples=few_shot_items,
         recent_messages=recent_history or None,
     )
 

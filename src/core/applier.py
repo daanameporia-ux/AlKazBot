@@ -37,6 +37,9 @@ from src.db.repositories import (
     expenses as expense_repo,
 )
 from src.db.repositories import (
+    few_shot as few_shot_repo,
+)
+from src.db.repositories import (
     knowledge as kb_repo,
 )
 from src.db.repositories import (
@@ -107,6 +110,26 @@ async def _resolve_fx(
             "Сначала запиши курс (строка вида '80000/1000=80'), потом эту операцию."
         )
     return _positive_fx(snap.rate, field="fx_rate (из базы)")
+
+
+async def _record_verified(
+    session: AsyncSession, op: PendingOp
+) -> None:
+    """After a successful apply, save the pairing as a verified few-shot
+    example so future analyses can cite it.
+    """
+    # Skip meta-intents — only business ops accumulate training material.
+    if op.intent in ("knowledge_teach", "chat", "question", "unclear", "feedback"):
+        return
+    try:
+        await few_shot_repo.add_verified(
+            session,
+            intent=op.intent,
+            input_text=op.summary or "",
+            parsed_json=op.fields,
+        )
+    except Exception:
+        log.exception("few_shot_save_failed", intent=op.intent)
 
 
 async def apply(
@@ -245,6 +268,18 @@ async def apply(
             old={"status": cab.status}, new={"status": "blocked"},
         )
         return f"⚠️ Кабинет {cab.name or cab.auto_code} помечен заблокированным."
+
+    if intent == Intent.CABINET_RECOVERED.value:
+        key = str(f.get("name_or_code") or "").strip()
+        cab = await cabinet_repo.find_by_name_or_code(session, key)
+        if cab is None:
+            raise ApplyError(f"Не нашёл кабинет: {key}")
+        await cabinet_repo.set_status(session, cab.id, "recovered")
+        await _audit(
+            session, user_id, "status_change", "cabinets", cab.id,
+            old={"status": cab.status}, new={"status": "recovered"},
+        )
+        return f"✅ Кабинет {cab.name or cab.auto_code} восстановлен."
 
     if intent == Intent.PREPAYMENT_GIVEN.value:
         amount_rub = _req_dec(f.get("amount_rub"), "amount_rub")

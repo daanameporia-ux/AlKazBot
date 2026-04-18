@@ -149,17 +149,24 @@ async def generate(session: AsyncSession, *, created_by_user_id: int | None = No
         {"name": (n or code), "code": code} for n, code in worked_rows
     ]
 
-    # --- Formula ---
-    total_assets = total_material + total_prepayments
-    total_liabilities = total_debts
-    net_profit = (
-        total_wallets
-        + total_assets
-        - total_liabilities
-        - total_partner_depo
-        - total_partner_poa
-        + total_partner_withdrawals
+    # --- Formula (pure arithmetic extracted to report_formula for testability) ---
+    from src.core.report_formula import ReportInputs
+    from src.core.report_formula import compute as compute_totals
+
+    totals = compute_totals(
+        ReportInputs(
+            total_wallets=total_wallets,
+            total_material=total_material,
+            total_prepayments=total_prepayments,
+            total_debts=total_debts,
+            partner_initial_depo=total_partner_depo,
+            partner_poa_share=total_partner_poa,
+            partner_withdrawals=total_partner_withdrawals,
+        )
     )
+    total_assets = totals.total_assets
+    total_liabilities = totals.total_liabilities
+    net_profit = totals.net_profit
 
     # --- Render ---
     today = date.today()
@@ -195,11 +202,23 @@ async def generate(session: AsyncSession, *, created_by_user_id: int | None = No
 
     text = "\n".join(parts)
 
+    # --- Did the team log acquiring today? ---
+    from src.db.models import Expense
+
+    today = date.today()
+    res = await session.execute(
+        select(func.count(Expense.id)).where(
+            Expense.category == "acquiring",
+            Expense.expense_date == today,
+        )
+    )
+    acquiring_today_flag = (res.scalar_one() or 0) > 0
+
     # --- Persist the report ---
     rep = Report(
         created_by=created_by_user_id,
         cabinets_worked=cabinets_worked_list,
-        acquiring_today=None,  # TODO: populated from daily acquiring expense
+        acquiring_today=acquiring_today_flag,
         total_wallets=total_wallets,
         total_assets=total_assets,
         total_liabilities=total_liabilities,

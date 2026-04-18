@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from src.bot.batcher import MAX_BATCH_SIZE, BatchBuffer, BufferedMessage
 
 

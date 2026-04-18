@@ -10,7 +10,6 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-
 from src.core.applier import ApplyError, _dec, _req_dec
 
 

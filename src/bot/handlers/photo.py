@@ -19,7 +19,7 @@ from src.core import pending_ops
 from src.core.batch_processor import (
     make_flush_handler as _mk,  # noqa: F401 — warm up the import chain
 )
-from src.core.preview import render as render_preview
+from src.core.preview import render_op_card
 from src.db.repositories import knowledge as kb_repo
 from src.db.session import session_scope
 from src.llm.batch_analyzer import ANALYZE_TOOL, BATCH_INSTRUCTION, BatchAnalysis
@@ -162,13 +162,14 @@ async def on_photo(message: Message) -> None:
             source_message_ids=[message.message_id],
             created_by_tg_id=message.from_user.id,
         )
-        # Reuse the preview rendering + buttons from batch_processor.
         from src.core.batch_processor import _confirm_kb
 
-        text = render_preview(op.intent.value, op.fields, op.summary)
-        if op.confidence < 0.7:
-            text += f"\n\n<i>Confidence {op.confidence:.2f} — перепроверь.</i>"
-        if op.ambiguities:
-            text += "\n\n<i>Сомнения:</i>\n" + "\n".join(f"• {a}" for a in op.ambiguities)
+        text = render_op_card(
+            intent=op.intent.value,
+            fields=op.fields,
+            summary=op.summary,
+            confidence=op.confidence,
+            ambiguities=op.ambiguities,
+        )
         sent = await message.answer(text, reply_markup=_confirm_kb(entry.uid))
         await pending_ops.attach_preview(entry.uid, sent.message_id)

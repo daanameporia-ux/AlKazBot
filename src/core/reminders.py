@@ -262,6 +262,17 @@ async def _check_client_debt_stale(bot: Bot) -> None:
 # --------------------------------------------------------------------------- #
 
 
+async def _check_pending_op_expiry(bot: Bot) -> None:
+    """Run every 15 min — mark stale pending-op rows as expired and
+    strike their preview cards so users know not to bother tapping."""
+    from src.core import pending_ops
+
+    try:
+        await pending_ops.expire_stale(bot=bot)
+    except Exception:
+        log.exception("pending_op_expiry_failed")
+
+
 _JOBS: list[tuple[str, Any, int]] = [
     # (name, coro, interval_minutes)
     ("report_overdue", _check_report_overdue, 15),
@@ -269,6 +280,7 @@ _JOBS: list[tuple[str, Any, int]] = [
     ("cabinet_too_long", _check_cabinet_too_long, 30),
     ("poa_without_exchange", _check_poa_without_exchange, 15),
     ("client_debt_stale", _check_client_debt_stale, 60),
+    ("pending_op_expiry", _check_pending_op_expiry, 15),
 ]
 
 

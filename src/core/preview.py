@@ -29,6 +29,29 @@ def _fmt_usdt(x) -> str:
     return f"{v:,.2f} USDT".replace(",", " ")
 
 
+CONFIDENCE_ACCEPT_THRESHOLD = 0.7
+
+
+def render_op_card(
+    *,
+    intent: str,
+    fields: dict[str, Any],
+    summary: str,
+    confidence: float = 1.0,
+    ambiguities: list[str] | None = None,
+) -> str:
+    """Full preview text for a candidate operation — body + confidence
+    footer + ambiguities footer. Shared between batch_processor (group
+    chat) and photo.py (vision).
+    """
+    text = render(intent, fields, summary)
+    if confidence < CONFIDENCE_ACCEPT_THRESHOLD:
+        text += f"\n\n<i>Confidence {confidence:.2f} — перепроверь.</i>"
+    if ambiguities:
+        text += "\n\n<i>Сомнения:</i>\n" + "\n".join(f"• {a}" for a in ambiguities)
+    return text
+
+
 def render(intent: str, fields: dict[str, Any], summary: str) -> str:
     intent_value = intent
     lines: list[str] = [f"<b>Записать?</b>  <i>{summary}</i>", ""]
@@ -82,6 +105,8 @@ def render(intent: str, fields: dict[str, Any], summary: str) -> str:
         lines.append(f"• Кабинет: {fields.get('name_or_code')}")
     elif intent_value == Intent.CABINET_BLOCKED.value:
         lines.append(f"• Кабинет: {fields.get('name_or_code')}  →  blocked")
+    elif intent_value == Intent.CABINET_RECOVERED.value:
+        lines.append(f"• Кабинет: {fields.get('name_or_code')}  →  recovered")
     elif intent_value == Intent.PREPAYMENT_GIVEN.value:
         lines += [
             f"• Поставщик: {fields.get('supplier')}",

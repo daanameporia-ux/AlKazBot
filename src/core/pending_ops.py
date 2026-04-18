@@ -162,16 +162,41 @@ async def list_active(chat_id: int | None = None) -> list[PendingOp]:
     return [_to_view(r) for r in rows]
 
 
-async def expire_stale() -> int:
-    """Mark status=expired on everything older than TTL. Returns count."""
+async def expire_stale(bot=None) -> int:
+    """Mark status=expired on everything older than TTL. Returns count.
+
+    If a `bot` is provided, we also edit the stale preview messages in
+    Telegram to strike the buttons so users don't keep tapping into the
+    void. Silently skips messages we can't edit anymore (user deleted them,
+    chat gone, etc.).
+    """
     cutoff = _utcnow() - timedelta(seconds=ENTRY_TTL_SEC)
     async with session_scope() as session:
         res = await session.execute(
-            update(PendingOperation)
-            .where(
+            select(PendingOperation).where(
                 PendingOperation.status == "pending",
                 PendingOperation.created_at <= cutoff,
             )
-            .values(status="expired")
         )
-        return res.rowcount or 0
+        stale = list(res.scalars().all())
+        for row in stale:
+            row.status = "expired"
+    if bot is not None:
+        import contextlib
+
+        for row in stale:
+            if row.preview_message_id is None:
+                continue
+            with contextlib.suppress(Exception):
+                await bot.edit_message_reply_markup(
+                    chat_id=row.chat_id,
+                    message_id=row.preview_message_id,
+                    reply_markup=None,
+                )
+                await bot.send_message(
+                    row.chat_id,
+                    f"⏰ Карточка «{row.summary[:80]}» истекла — не записал. "
+                    "Пришли снова если нужно.",
+                    reply_to_message_id=row.preview_message_id,
+                )
+    return len(stale)

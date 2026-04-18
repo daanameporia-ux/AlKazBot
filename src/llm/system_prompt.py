@@ -105,12 +105,18 @@ def render_knowledge_base(
 def render_few_shot(
     examples: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render verified few-shot examples filtered by intent. Stage 0 stub."""
+    """Render verified few-shot examples. Each example is a ({input_text,
+    intent, parsed_json}) triple captured at the moment a user pressed ✅.
+    """
     if not examples:
         return "# Few-shot examples\n(ещё не накоплены)\n"
-    parts = ["# Few-shot examples"]
+    parts = ["# Few-shot examples (verified by the team)"]
     for ex in examples:
-        parts.append(f"\nInput: {ex['input_text']}\nParsed: {ex['parsed_json']}")
+        parts.append(
+            f"\n• intent: {ex.get('intent')}"
+            f"\n  input: {ex.get('input_text','')[:300]}"
+            f"\n  parsed: {ex.get('parsed_json', {})}"
+        )
     return "\n".join(parts)
 
 

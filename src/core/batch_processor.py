@@ -17,16 +17,14 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot.batcher import Batch
 from src.bot.middlewares.logging import log_bot_reply
-from src.core import pending_ops
-from src.core.preview import render as render_preview
+from src.core import pending_ops, silent
+from src.core.preview import render_op_card
 from src.db.repositories import knowledge as kb_repo
 from src.db.session import session_scope
 from src.llm.batch_analyzer import analyze_batch
 from src.logging_setup import get_logger
 
 log = get_logger(__name__)
-
-CONFIDENCE_ACCEPT_THRESHOLD = 0.7
 
 
 def _confirm_kb(uid: str) -> InlineKeyboardMarkup:
@@ -42,13 +40,6 @@ def _confirm_kb(uid: str) -> InlineKeyboardMarkup:
 
 # Public alias for other handlers that need the same keyboard style.
 confirm_keyboard = _confirm_kb
-
-
-def _ambiguities_footer(op) -> str:
-    if not op.ambiguities:
-        return ""
-    bullets = "\n".join(f"• {a}" for a in op.ambiguities)
-    return f"\n\n<i>Сомнения:</i>\n{bullets}"
 
 
 async def _load_kb_items() -> list[dict]:
@@ -70,6 +61,10 @@ def make_flush_handler(bot: Bot):
     async def flush(batch: Batch) -> None:
         # Skip empty flushes (timer fired on empty buffer)
         if not batch.messages and batch.trigger is None:
+            return
+
+        if silent.is_silent():
+            log.info("batch_flush_silenced", chat_id=batch.chat_id)
             return
 
         kb = await _load_kb_items()
@@ -122,12 +117,13 @@ def make_flush_handler(bot: Bot):
                 source_message_ids=op.source_message_ids,
                 created_by_tg_id=created_by,
             )
-            preview_text = render_preview(op.intent.value, op.fields, op.summary)
-            if op.confidence < CONFIDENCE_ACCEPT_THRESHOLD:
-                preview_text += (
-                    f"\n\n<i>Confidence {op.confidence:.2f} — перепроверь.</i>"
-                )
-            preview_text += _ambiguities_footer(op)
+            preview_text = render_op_card(
+                intent=op.intent.value,
+                fields=op.fields,
+                summary=op.summary,
+                confidence=op.confidence,
+                ambiguities=op.ambiguities,
+            )
             try:
                 sent = await bot.send_message(
                     chat_id=batch.chat_id,
