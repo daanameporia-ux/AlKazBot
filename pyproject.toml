@@ -23,6 +23,7 @@ dependencies = [
     "python-dateutil>=2.9,<3",
     "tenacity>=9.0,<10",
     "orjson>=3.10,<4",
+    "pdfminer-six>=20231228",
 ]
 
 [project.optional-dependencies]
