@@ -74,12 +74,26 @@ def make_flush_handler(bot: Bot):
             log.exception("batch_analyze_failed", chat_id=batch.chat_id)
             return
 
+        # If it's chat-only: reply only when the batch had a direct trigger
+        # (mention/reply/command) AND the analyzer produced a chat_reply.
+        # Passive batches stay silent.
         if analysis.chat_only or not analysis.operations:
             log.info(
                 "batch_chat_only",
                 chat_id=batch.chat_id,
                 msgs=len(batch.messages),
+                has_reply=bool(analysis.chat_reply),
+                had_trigger=batch.trigger is not None,
             )
+            if batch.trigger is not None and analysis.chat_reply:
+                try:
+                    await bot.send_message(
+                        chat_id=batch.chat_id,
+                        text=analysis.chat_reply,
+                        reply_to_message_id=batch.trigger.tg_message_id,
+                    )
+                except Exception:
+                    log.exception("chat_reply_send_failed")
             return
 
         registry = get_registry()

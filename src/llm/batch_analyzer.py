@@ -58,6 +58,7 @@ class BatchAnalysis(BaseModel):
 
     operations: list[BatchOperation] = Field(default_factory=list)
     chat_only: bool = False
+    chat_reply: str | None = None
     notes: str | None = None
 
 
@@ -134,6 +135,17 @@ ANALYZE_TOOL = {
                 "type": "boolean",
                 "description": "true if the batch has no operations to record.",
             },
+            "chat_reply": {
+                "type": "string",
+                "description": (
+                    "Free-text Russian reply to send back to the chat. "
+                    "Required when chat_only=true AND the batch includes a "
+                    "trigger message (a direct @-mention, a reply to the "
+                    "bot, or a question). Must follow the personality/tone "
+                    "spec. Leave empty when there's no trigger (passive "
+                    "analysis should stay silent unless there are operations)."
+                ),
+            },
             "notes": {
                 "type": "string",
                 "description": "Optional free-text commentary for the user.",
@@ -150,7 +162,13 @@ BATCH_INSTRUCTION = """\
 You receive a list of chat messages from the sber26 accounting team's group.
 Each entry shows the Telegram message_id, author handle, and text. A batch
 may contain multiple separate operations (e.g. one snятие + one exchange +
-one payout), or may be pure chit-chat.
+one payout), or may be pure chit-chat, or a direct question to the bot.
+
+Possible sections in the input:
+- `[trigger message ...]` — the message that forced the flush right now
+  (an @-mention, reply to the bot, or slash-command). Treat it as the
+  "current request" the user wants answered.
+- Regular `[id=...]` entries — passive context that accumulated before.
 
 For each operation-like statement, return a `BatchOperation` entry with:
 - `intent` from the Intent enum
@@ -160,8 +178,14 @@ For each operation-like statement, return a `BatchOperation` entry with:
 - `fields` — the structured fields for that intent (see tool schema)
 - `ambiguities` — what you'd ask the user before persisting
 
-If the whole batch is chit-chat / questions to the bot / non-business —
-return `operations: []` and `chat_only: true`.
+If there are no operations AND there IS a trigger message:
+  - set `chat_only=true`
+  - write the actual Russian reply into `chat_reply` (following the
+    personality spec — по делу, не слащаво, допустимая лёгкая подъёбка)
+
+If there are no operations AND there's no trigger (purely passive
+analysis of buffered chit-chat): set `chat_only=true`, leave
+`chat_reply` empty. The bot will stay silent.
 
 Only return operations you are reasonably sure about. It's better to ask
 than to invent. Low confidence (< 0.7) or non-empty `ambiguities` is

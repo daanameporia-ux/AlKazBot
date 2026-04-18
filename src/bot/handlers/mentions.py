@@ -16,12 +16,11 @@ import re
 from aiogram import Router
 from aiogram.types import Message
 
+from src.bot.batcher import BufferedMessage, get_batch_buffer, is_main_group, now_ts
 from src.db.repositories import knowledge as kb_repo
 from src.db.repositories import users as user_repo
 from src.db.session import session_scope
-from src.llm.pipeline import process_message
 from src.logging_setup import get_logger
-from src.personality.phrases import BOT_ERROR_FALLBACK
 
 log = get_logger(__name__)
 router = Router(name="mentions")
@@ -122,18 +121,37 @@ async def on_mention(message: Message) -> None:
                 created_by_user_id=me_user.id if me_user else None,
             )
         await message.reply(
-            f"Записал `#{stored.id}`: {stored.content}",
-            parse_mode="Markdown",
+            f"Записал #{stored.id}: {stored.content}",
         )
         return
 
-    # General path — LLM pipeline.
+    # Flush the batch buffer with the trigger message so the analyzer sees
+    # the @/reply + any buffered passive context together, and either
+    # produces a list of operation cards or a chat_reply. Only the main
+    # group uses the buffer; private chats / other groups still get a one-
+    # shot reply path (future: extend batcher to per-chat).
+    if is_main_group(message.chat.id) and message.from_user:
+        trigger = BufferedMessage(
+            tg_message_id=message.message_id,
+            tg_user_id=message.from_user.id,
+            display_name=message.from_user.full_name,
+            text=body,
+            received_at=now_ts(),
+        )
+        trigger_kind = "reply" if classic_reply or ext_reply else "mention"
+        buf = get_batch_buffer()
+        await buf.flush_now(message.chat.id, trigger=trigger, trigger_kind=trigger_kind)
+        return
+
+    # Non-main-group fallback: answer via the old pipeline.
+    from src.llm.pipeline import process_message
+    from src.personality.phrases import BOT_ERROR_FALLBACK
+
     try:
         result = await process_message(body)
     except Exception:
         log.exception("mention_pipeline_failed")
         await message.reply(BOT_ERROR_FALLBACK)
         return
-
     if result.reply_text:
         await message.reply(result.reply_text)

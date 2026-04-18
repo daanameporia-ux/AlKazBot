@@ -22,9 +22,11 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
+from src.bot.batcher import get_batch_buffer
 from src.bot.handlers import router as root_router
 from src.bot.middlewares import MessageLoggingMiddleware, WhitelistMiddleware
 from src.config import settings
+from src.core.batch_processor import make_flush_handler
 from src.logging_setup import configure_logging, get_logger
 
 
@@ -76,6 +78,9 @@ async def _runner() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+
+    # Initialise the batch buffer singleton with the bot-bound flush handler.
+    get_batch_buffer(make_flush_handler(bot))
 
     # Outer middleware: whitelist (drops unauthorized updates).
     dp.message.outer_middleware(WhitelistMiddleware())
