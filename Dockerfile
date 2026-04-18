@@ -9,19 +9,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install dependencies first (cache layer) — copy lockfile + manifest only.
+# Install dependencies first for better layer caching.
+# No BuildKit cache mounts — Railway's builder rejects them without an id,
+# and they're only a speed-up anyway.
 COPY pyproject.toml uv.lock* ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev || \
+RUN uv sync --frozen --no-install-project --no-dev || \
     uv sync --no-install-project --no-dev
 
 # Copy project sources.
 COPY . .
 
-# Install the project itself (so `uv run` resolves local package).
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev || uv sync --no-dev
+# Install the project itself (so `uv run` resolves the local package).
+RUN uv sync --frozen --no-dev || uv sync --no-dev
 
-# Railway sets PORT but we use long-polling, so nothing to expose.
+# Long-polling — no HTTP port to expose.
 # Default command comes from railway.toml; keep CMD as a sane fallback.
 CMD ["uv", "run", "python", "-m", "src.bot.main"]
