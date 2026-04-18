@@ -59,6 +59,7 @@ async def _setup_commands(bot: Bot) -> None:
 
 
 async def _runner() -> None:
+    print("[boot] _runner() entered", flush=True)
     configure_logging()
     log = get_logger(__name__)
     _init_sentry()
@@ -113,11 +114,17 @@ async def _runner() -> None:
 
 
 def main() -> None:
+    print("[boot] main() called", flush=True)
     try:
         asyncio.run(_runner())
     except KeyboardInterrupt:
         sys.exit(0)
+    except BaseException as e:  # noqa: BLE001
+        # Last-ditch visibility on startup-crash in Railway logs.
+        print(f"[boot] fatal: {e.__class__.__name__}: {e}", flush=True)
+        raise
 
 
 if __name__ == "__main__":
+    print("[boot] entry module loaded", flush=True)
     main()
