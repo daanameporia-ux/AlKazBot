@@ -17,7 +17,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot.batcher import Batch
 from src.bot.middlewares.logging import log_bot_reply
-from src.core.pending_ops import PendingOp, get_registry
+from src.core import pending_ops
 from src.core.preview import render as render_preview
 from src.db.repositories import knowledge as kb_repo
 from src.db.session import session_scope
@@ -107,7 +107,6 @@ def make_flush_handler(bot: Bot):
                     log.exception("chat_reply_send_failed")
             return
 
-        registry = get_registry()
         created_by = (
             batch.trigger.tg_user_id
             if batch.trigger
@@ -115,7 +114,7 @@ def make_flush_handler(bot: Bot):
         )
 
         for op in analysis.operations:
-            entry: PendingOp = await registry.register(
+            entry = await pending_ops.register(
                 chat_id=batch.chat_id,
                 intent=op.intent.value,
                 fields=op.fields,
@@ -135,7 +134,7 @@ def make_flush_handler(bot: Bot):
                     text=preview_text,
                     reply_markup=_confirm_kb(entry.uid),
                 )
-                await registry.attach_preview(entry.uid, sent.message_id)
+                await pending_ops.attach_preview(entry.uid, sent.message_id)
                 await log_bot_reply(
                     chat_id=batch.chat_id,
                     tg_message_id=sent.message_id,

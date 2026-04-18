@@ -8,8 +8,8 @@ import random
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
+from src.core import pending_ops
 from src.core.applier import ApplyError, apply
-from src.core.pending_ops import get_registry
 from src.db.repositories import stickers as sticker_repo
 from src.db.session import session_scope
 from src.logging_setup import get_logger
@@ -43,8 +43,7 @@ async def on_confirm(q: CallbackQuery) -> None:
         await q.answer()
         return
     uid = q.data.split(":", 1)[1]
-    reg = get_registry()
-    op = await reg.pop(uid)
+    op = await pending_ops.pop_for_confirm(uid)
     if op is None:
         await q.answer("Эта операция уже обработана или истекла.", show_alert=True)
         return
@@ -85,8 +84,7 @@ async def on_cancel(q: CallbackQuery) -> None:
         await q.answer()
         return
     uid = q.data.split(":", 1)[1]
-    reg = get_registry()
-    op = await reg.pop(uid)
+    op = await pending_ops.pop_for_cancel(uid)
     if q.message:
         new_text = (
             (q.message.html_text or "") + "\n\n❌ <i>Отменено.</i>"

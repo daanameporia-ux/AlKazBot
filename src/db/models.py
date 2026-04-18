@@ -412,6 +412,38 @@ class PendingReminder(Base):
     context: Mapped[Any | None] = mapped_column(JSONB)
 
 
+class PendingOperation(Base):
+    """A preview-card shown to the user, awaiting ✅ / ❌.
+
+    Persisting these means Railway redeploys no longer throw away active
+    cards — the bot can replay unexpired previews from the DB on startup,
+    and users pressing ✅ after a restart still works.
+    """
+
+    __tablename__ = "pending_ops"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','confirmed','cancelled','expired')",
+            name="ck_pending_ops_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    uid: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    preview_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    intent: Mapped[str] = mapped_column(Text, nullable=False)
+    fields: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    source_message_ids: Mapped[Any] = mapped_column(JSONB, default=list)
+    created_by_tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(Text, default="pending", nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SeenSticker(Base):
     """Stickers we've observed in the group chat.
 
