@@ -412,6 +412,34 @@ class PendingReminder(Base):
     context: Mapped[Any | None] = mapped_column(JSONB)
 
 
+class SeenSticker(Base):
+    """Stickers we've observed in the group chat.
+
+    Populated in two ways:
+      * `stickers` handler catches every sticker message — logs its file_id
+        and expands the whole `set_name` via bot.get_sticker_set().
+      * Manual `/knowledge` teaching (future) can also pin specific stickers.
+
+    The bot can pick a situationally-appropriate sticker by filtering on
+    `emoji` (matching the mood the bot wants to express).
+    """
+
+    __tablename__ = "seen_stickers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    file_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    file_unique_id: Mapped[str | None] = mapped_column(Text, index=True)
+    sticker_set: Mapped[str | None] = mapped_column(Text, index=True)
+    emoji: Mapped[str | None] = mapped_column(Text, index=True)
+    is_animated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_video: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_used: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    usage_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 __all__ = [
     "AuditLog",
     "Base",
