@@ -39,15 +39,28 @@ async def _addressed_to_me(message: Message) -> bool:
     A reply thread IS an explicit form of address: it's equivalent to tagging.
     """
     me = await message.bot.me()
-    # @-mention in text / caption
     text = message.text or message.caption or ""
-    if text and f"@{me.username}".lower() in text.lower():
-        return True
-    # Reply to bot's own message
+    text_lower = text.lower()
+    mention = bool(text and f"@{me.username}".lower() in text_lower)
+
     rpy = message.reply_to_message
-    if rpy and rpy.from_user and rpy.from_user.id == me.id:
-        return True
-    return False
+    reply_to_bot = bool(
+        rpy and rpy.from_user and rpy.from_user.id == me.id
+    )
+
+    log.info(
+        "addressed_probe",
+        mention=mention,
+        reply_to_bot=reply_to_bot,
+        has_reply=bool(rpy),
+        reply_from_id=(rpy.from_user.id if rpy and rpy.from_user else None),
+        reply_from_is_bot=(rpy.from_user.is_bot if rpy and rpy.from_user else None),
+        me_id=me.id,
+        me_username=me.username,
+        text_preview=text[:80],
+    )
+
+    return mention or reply_to_bot
 
 
 def _strip_mention(text: str, bot_username: str) -> str:
