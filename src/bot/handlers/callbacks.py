@@ -3,14 +3,35 @@
 from __future__ import annotations
 
 import contextlib
+import random
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
 from src.core.applier import ApplyError, apply
 from src.core.pending_ops import get_registry
+from src.db.repositories import stickers as sticker_repo
 from src.db.session import session_scope
 from src.logging_setup import get_logger
+
+# Emoji pools for different bot reactions.
+POSITIVE_EMOJIS = ["✅", "👍", "🔥", "😎", "💪", "🫡", "🎯", "💯"]
+NEGATIVE_EMOJIS = ["❌", "🙅", "😒", "🙄", "🤷"]
+
+
+async def _maybe_sticker(
+    q: CallbackQuery, emojis: list[str], chance: float = 0.35
+) -> None:
+    """With `chance` probability, reply with a sticker whose emoji matches."""
+    if random.random() >= chance:
+        return
+    async with session_scope() as session:
+        st = await sticker_repo.pick_by_emoji(session, emojis)
+        if st is None:
+            return
+        await sticker_repo.bump_usage(session, st.id)
+    with contextlib.suppress(Exception):
+        await q.message.bot.send_sticker(chat_id=q.message.chat.id, sticker=st.file_id)
 
 log = get_logger(__name__)
 router = Router(name="callbacks")
@@ -53,6 +74,9 @@ async def on_confirm(q: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await q.message.edit_text(new_text, reply_markup=None)
     await q.answer("Записал.")
+    # Sprinkle a fitting sticker now and then so the chat feels alive.
+    if q.message:
+        await _maybe_sticker(q, POSITIVE_EMOJIS, chance=0.3)
 
 
 @router.callback_query(F.data.startswith("cancel:"))

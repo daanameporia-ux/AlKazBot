@@ -547,6 +547,55 @@ async def cmd_silent(message: Message) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# /avatar — set the group chat photo (reply to a photo)
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("avatar"))
+async def cmd_avatar(message: Message) -> None:
+    """Set the group's chat photo from the photo you reply this command to.
+
+    Usage: send a photo, then reply to it with `/avatar`. Bot must be an
+    admin with `can_change_info` — you already granted that.
+    """
+    import io
+
+    from aiogram.types import BufferedInputFile
+
+    if message.chat.type not in ("group", "supergroup"):
+        await message.reply("Эта команда только для группового чата.")
+        return
+    rpy = message.reply_to_message
+    if rpy is None or not rpy.photo:
+        await message.reply(
+            "Ответь этой командой на фото, которое хочешь поставить аватаркой."
+        )
+        return
+
+    largest = rpy.photo[-1]
+    try:
+        buf = io.BytesIO()
+        await message.bot.download(largest, destination=buf)
+    except Exception:
+        await message.reply("Не смог скачать фото. Попробуй ещё раз.")
+        return
+
+    data = buf.getvalue()
+    try:
+        await message.bot.set_chat_photo(
+            chat_id=message.chat.id,
+            photo=BufferedInputFile(data, filename="chat_photo.jpg"),
+        )
+    except Exception as e:
+        await message.reply(
+            f"Не получилось сменить аватарку: {e}. Проверь что я админ "
+            "с правом 'Change group info'."
+        )
+        return
+    await message.reply("✅ Аватарка обновлена.")
+
+
+# --------------------------------------------------------------------------- #
 # /report — full end-of-day report
 # --------------------------------------------------------------------------- #
 

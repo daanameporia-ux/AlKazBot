@@ -39,6 +39,10 @@ def _confirm_kb(uid: str) -> InlineKeyboardMarkup:
     )
 
 
+# Public alias for other handlers that need the same keyboard style.
+confirm_keyboard = _confirm_kb
+
+
 def _ambiguities_footer(op) -> str:
     if not op.ambiguities:
         return ""
