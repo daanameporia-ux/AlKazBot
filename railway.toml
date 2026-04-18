@@ -12,7 +12,7 @@ dockerfilePath = "Dockerfile"
 [deploy]
 # Alembic migrations run on every deploy, then the bot starts (long-polling).
 # `.venv/bin` is on PATH via the Dockerfile — no `uv run` wrapper.
-# Extra `echo` markers + `python -u` for quick post-mortem if startup stalls.
-startCommand = "echo '[run] alembic...' && alembic upgrade head && echo '[run] alembic ok, starting python...' && python -u -m src.bot.main"
+# Extra markers + connectivity probe so we can see exactly where startup dies.
+startCommand = "python -u scripts/entrypoint.py"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
