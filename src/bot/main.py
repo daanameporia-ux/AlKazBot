@@ -27,6 +27,7 @@ from src.bot.handlers import router as root_router
 from src.bot.middlewares import MessageLoggingMiddleware, WhitelistMiddleware
 from src.config import settings
 from src.core.batch_processor import make_flush_handler
+from src.core.reminders import start_scheduler
 from src.logging_setup import configure_logging, get_logger
 
 
@@ -92,6 +93,9 @@ async def _runner() -> None:
 
     await _setup_commands(bot)
 
+    # APScheduler background reminders — won't fire before MAIN_CHAT_ID is set.
+    scheduler = start_scheduler(bot)
+
     # Graceful shutdown on SIGTERM (Railway redeploys send it).
     stop_event = asyncio.Event()
 
@@ -110,6 +114,7 @@ async def _runner() -> None:
     )
 
     await stop_event.wait()
+    scheduler.shutdown(wait=False)
     await dp.stop_polling()
     polling_task.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):

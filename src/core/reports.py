@@ -25,8 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.models import (
     Cabinet,
     Client,
-    PartnerContribution,
-    PartnerWithdrawal,
     PoAWithdrawal,
     Prepayment,
     Report,
