@@ -84,3 +84,41 @@
 - Anthropic рекомендует `tool_use` для схем (строгая валидация на их
   стороне). JSON mode даёт более слабые гарантии.
 - Реализация — на Этапе 1 (парсер).
+
+### D-016. На Railway — Postgres через public TCP-proxy, не internal network
+- Railway private networking (`<service>.railway.internal`) — IPv6-only.
+  У аккаунта юзера `ipv6EgressEnabled=false` и включение требует
+  account-level feature-flag — лишний клик.
+- Развязали: `tcpProxyCreate` → `metro.proxy.rlwy.net:16645` → пишем
+  его в `DATABASE_URL` как публичный endpoint. Сетевой overhead мизерный
+  (оба контейнера в одной US-east-ish локации Railway).
+- Когда IPv6 egress будет включён в аккаунте — можно переписать DSN
+  обратно на `postgres.railway.internal:5432`.
+
+### D-017. Container entrypoint = `scripts/entrypoint.py`, не shell one-liner
+- Railway runtime-логи обрывались после `alembic` init без traceback —
+  Python stdout либо буферился, либо процесс умирал silently.
+- Заменили shell-chain на `python -u scripts/entrypoint.py`. Он
+  последовательно пишет `[entrypoint] ...` маркеры через
+  `print(..., flush=True)`: env snapshot, DNS, TCP probe, alembic,
+  импорт main. Один взгляд на Railway logs — и видно где оборвалось.
+- Плюс безболезненно меняется в одном файле (в отличие от inline
+  startCommand).
+
+### D-018. Reply-detection учитывает Bot API 7.0 `external_reply`
+- Telegram клиент (iOS / macOS Desktop в последних версиях) часть
+  reply-событий отсылает боту как `external_reply` + `quote`, не как
+  классический `reply_to_message`. Если проверять только старое поле —
+  бот игнорирует reply и юзер думает что его не слышат.
+- В `mentions._addressed_to_me` проверяем OR по трём путям:
+  `@mention` | `reply_to_message.from_user.id == me.id` |
+  `external_reply.origin.sender_user.id == me.id`.
+
+### D-019. Railway account-token → GraphQL, не CLI
+- `railway` CLI не принимает account-token через `RAILWAY_API_TOKEN`
+  для read-write операций (тестили — `Unauthorized`).
+- Работает прямой GraphQL API: `https://backboard.railway.app/graphql/v2`
+  с `Authorization: Bearer <token>` (Cloudflare 1010 блокирует
+  urllib-UA, использую curl как транспорт).
+- Тонкая обёртка — `.scratch/rw.py` (не коммитится, нужен только
+  автоматизатору).

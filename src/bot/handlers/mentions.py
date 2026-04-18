@@ -65,40 +65,30 @@ def _strip_mention(text: str, bot_username: str) -> str:
 
 @router.message()
 async def on_mention(message: Message) -> None:
-    # Verbose diagnostic dump — Telegram has three reply-ish fields since
-    # Bot API 7.0 (reply_to_message, external_reply, quote). We want to see
-    # exactly which one (if any) is populated.
-    ext = getattr(message, "external_reply", None)
-    quote = getattr(message, "quote", None)
-    print(
-        f"[mentions] entered: chat={message.chat.id} "
-        f"user={message.from_user.id if message.from_user else '?'} "
-        f"has_reply={message.reply_to_message is not None} "
-        f"reply_from_id={(message.reply_to_message.from_user.id if message.reply_to_message and message.reply_to_message.from_user else None)} "
-        f"reply_from_is_bot={(message.reply_to_message.from_user.is_bot if message.reply_to_message and message.reply_to_message.from_user else None)} "
-        f"has_ext_reply={ext is not None} "
-        f"ext_origin_sender_is_bot={(getattr(ext.origin, 'sender_user', None).is_bot if ext and getattr(ext, 'origin', None) and getattr(ext.origin, 'sender_user', None) else None)} "
-        f"has_quote={quote is not None} "
-        f"thread_id={message.message_thread_id} "
-        f"text={(message.text or '')[:60]!r}",
-        flush=True,
-    )
     if not await _addressed_to_me(message):
-        print("[mentions] not addressed -> skip", flush=True)
         return
 
     me = await message.bot.me()
     raw = message.text or message.caption or ""
     body = _strip_mention(raw, me.username or "")
-    is_reply = bool(
+
+    classic_reply = bool(
         message.reply_to_message
         and message.reply_to_message.from_user
         and message.reply_to_message.from_user.id == me.id
     )
+    ext = getattr(message, "external_reply", None)
+    ext_reply = bool(
+        ext
+        and getattr(ext, "origin", None)
+        and getattr(ext.origin, "sender_user", None)
+        and ext.origin.sender_user.id == me.id
+    )
+    via = "reply" if classic_reply else ("external_reply" if ext_reply else "at_mention")
 
     log.info(
         "mention_received",
-        via="reply" if is_reply else "at_mention",
+        via=via,
         text_preview=body[:120],
         user_id=message.from_user.id if message.from_user else None,
         chat_id=message.chat.id,
