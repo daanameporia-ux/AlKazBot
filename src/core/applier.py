@@ -281,6 +281,57 @@ async def apply(
         )
         return f"✅ Кабинет {cab.name or cab.auto_code} восстановлен."
 
+    if intent == Intent.PREPAYMENT_FULFILLED.value:
+        # Matches "Миша отдал 4 кабинета: Аляс 25k, Боб 20k..." — creates
+        # cabinets and closes the referenced prepayment if sums match.
+        supplier = str(f.get("supplier") or "").strip() or None
+        cabinets_in = f.get("cabinets") or []
+        if not cabinets_in:
+            raise ApplyError("Список кабинетов пустой.")
+
+        fx = await _resolve_fx(session, _dec(f.get("fx_rate")))
+
+        prep = None
+        if supplier:
+            prep = await prepayment_repo.find_open_by_supplier(session, supplier)
+
+        total_rub = Decimal("0")
+        created_ids: list[int] = []
+        for c in cabinets_in:
+            cost_rub = _req_dec(c.get("cost_rub"), "cabinet.cost_rub")
+            cost_usdt = cost_rub / fx
+            cab = await cabinet_repo.create(
+                session,
+                name=c.get("name"),
+                cost_rub=cost_rub,
+                cost_usdt=cost_usdt,
+                fx_rate=fx,
+                prepayment_id=prep.id if prep else None,
+            )
+            total_rub += cost_rub
+            created_ids.append(cab.id)
+
+        summary = f"✅ Приняты {len(cabinets_in)} кабинета(ов) от {supplier or '?'}."
+        if prep is not None:
+            prep_amount = Decimal(prep.amount_rub)
+            diff = total_rub - prep_amount
+            if abs(diff) < Decimal("1"):
+                await prepayment_repo.set_status(session, prep.id, "fulfilled")
+                summary += f" Предоплата #{prep.id} закрыта ровно."
+            else:
+                await prepayment_repo.set_status(
+                    session, prep.id, "partial" if total_rub < prep_amount else "fulfilled"
+                )
+                summary += (
+                    f" ⚠️ Сумма кабинетов {total_rub:.0f}₽ ≠ предоплате "
+                    f"{prep_amount:.0f}₽ (разница {diff:+.0f}₽)."
+                )
+        await _audit(
+            session, user_id, "create", "cabinets", created_ids[0] if created_ids else 0,
+            new={"supplier": supplier, "count": len(cabinets_in), "total_rub": str(total_rub)},
+        )
+        return summary
+
     if intent == Intent.PREPAYMENT_GIVEN.value:
         amount_rub = _req_dec(f.get("amount_rub"), "amount_rub")
         fx = await _resolve_fx(session, _dec(f.get("fx_rate")))

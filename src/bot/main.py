@@ -24,7 +24,11 @@ from aiogram.types import BotCommand
 
 from src.bot.batcher import get_batch_buffer
 from src.bot.handlers import router as root_router
-from src.bot.middlewares import MessageLoggingMiddleware, WhitelistMiddleware
+from src.bot.middlewares import (
+    MessageLoggingMiddleware,
+    RateLimitMiddleware,
+    WhitelistMiddleware,
+)
 from src.config import settings
 from src.core.batch_processor import make_flush_handler
 from src.core.reminders import start_scheduler
@@ -83,7 +87,9 @@ async def _runner() -> None:
     # Initialise the batch buffer singleton with the bot-bound flush handler.
     get_batch_buffer(make_flush_handler(bot))
 
-    # Outer middleware: whitelist (drops unauthorized updates).
+    # Outer middleware chain: rate-limit first (cheapest reject), then
+    # whitelist (drops unauthorized).
+    dp.message.outer_middleware(RateLimitMiddleware())
     dp.message.outer_middleware(WhitelistMiddleware())
     dp.callback_query.outer_middleware(WhitelistMiddleware())
     # Inner middleware: persist every surviving message.
@@ -95,6 +101,20 @@ async def _runner() -> None:
 
     # APScheduler background reminders — won't fire before MAIN_CHAT_ID is set.
     scheduler = start_scheduler(bot)
+
+    # Resync missed messages from the downtime window (fire and forget).
+    async def _startup_resync() -> None:
+        try:
+            from src.core.resync import resync
+
+            triggered = await resync(bot)
+            log.info("startup_resync", chats=len(triggered))
+        except Exception:
+            log.exception("startup_resync_failed")
+
+    _startup_resync_task = asyncio.create_task(  # noqa: RUF006 — fire-and-forget, we keep a ref to silence the warning
+        _startup_resync(), name="startup-resync"
+    )
 
     # Graceful shutdown on SIGTERM (Railway redeploys send it).
     stop_event = asyncio.Event()
@@ -119,6 +139,18 @@ async def _runner() -> None:
     polling_task.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await polling_task
+    # Drain any in-flight batch-flush tasks (up to 15 s) so users don't lose
+    # preview cards to SIGTERM.
+    try:
+        buf = get_batch_buffer()
+        inflight = list(buf._inflight)
+        if inflight:
+            log.info("draining_inflight_tasks", count=len(inflight))
+            _done, pending = await asyncio.wait(inflight, timeout=15)
+            if pending:
+                log.warning("drain_timeout", still_pending=len(pending))
+    except Exception:
+        log.exception("drain_failed")
     await bot.session.close()
     log.info("bot_stopped")
 

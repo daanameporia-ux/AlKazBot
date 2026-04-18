@@ -60,19 +60,45 @@ async def record_withdrawal(
 async def resolve_partner(
     session: AsyncSession, name_or_alias: str
 ) -> Partner | None:
-    """Case-insensitive, handles 'Казах'/'казах'/'kazakh' etc."""
-    candidates = {
-        name_or_alias.strip(),
-        name_or_alias.strip().lower(),
-        name_or_alias.strip().title(),
-    }
-    for c in list(candidates):
-        res = await session.execute(
-            select(Partner).where(
-                Partner.name == c, Partner.is_active.is_(True)
-            )
+    """Case-insensitive match against Partner.name, plus knowledge-base alias
+    lookup (so 'kazakh' → 'Казах' works after the user teaches the bot).
+    """
+    from sqlalchemy import func as sa_func
+
+    from src.db.models import KnowledgeBase
+
+    key = name_or_alias.strip()
+    if not key:
+        return None
+    # 1. Direct name match (case-insensitive).
+    res = await session.execute(
+        select(Partner).where(
+            sa_func.lower(Partner.name) == key.lower(),
+            Partner.is_active.is_(True),
         )
-        p = res.scalar_one_or_none()
-        if p is not None:
-            return p
+    )
+    p = res.scalar_one_or_none()
+    if p is not None:
+        return p
+
+    # 2. Alias via KB: look for an `alias` entry where key matches, try to
+    # match its content against any partner.
+    res = await session.execute(
+        select(KnowledgeBase).where(
+            KnowledgeBase.category == "alias",
+            KnowledgeBase.is_active.is_(True),
+            sa_func.lower(KnowledgeBase.key) == key.lower(),
+        )
+    )
+    alias_rows = list(res.scalars().all())
+    partners = (
+        (await session.execute(select(Partner).where(Partner.is_active.is_(True))))
+        .scalars()
+        .all()
+    )
+    for row in alias_rows:
+        content_lower = (row.content or "").lower()
+        for partner in partners:
+            if partner.name.lower() in content_lower:
+                return partner
     return None

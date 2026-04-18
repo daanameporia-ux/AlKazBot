@@ -152,11 +152,33 @@ async def cmd_knowledge(message: Message, command: CommandObject) -> None:
         try:
             fact_id = int(head.strip())
         except ValueError:
-            await message.reply("`/knowledge edit <id> <новый текст>`", parse_mode="Markdown")
+            await message.reply(
+                "<code>/knowledge edit &lt;id&gt; &lt;новый текст&gt;</code>\n"
+                "без текста — покажу текущее значение и ты пришлёшь reply с новым."
+            )
             return
         new_text = new_text.strip()
         if not new_text:
-            await message.reply("Пустой текст, нечего сохранять.")
+            # Show the current value and ask for a reply.
+            from sqlalchemy import select
+
+            from src.db.models import KnowledgeBase
+
+            async with session_scope() as session:
+                res = await session.execute(
+                    select(KnowledgeBase).where(KnowledgeBase.id == fact_id)
+                )
+                fact = res.scalar_one_or_none()
+            if fact is None or not fact.is_active:
+                await message.reply(f"Нет такого `#{fact_id}`.", parse_mode="Markdown")
+                return
+            key_part = f" <b>[{fact.key}]</b>" if fact.key else ""
+            await message.reply(
+                f"Текущий <code>#{fact_id}</code> ({fact.category}){key_part}:\n"
+                f"<i>{fact.content}</i>\n\n"
+                f"Reply на это сообщение с новым текстом — и я заменю. "
+                f"Или пришли сразу: <code>/knowledge edit {fact_id} новый текст</code>"
+            )
             return
         async with session_scope() as session:
             ok = await kb_repo.edit_content(session, fact_id, new_text)
@@ -458,11 +480,44 @@ async def cmd_history(message: Message, command: CommandObject) -> None:
     if not rows:
         await message.answer("Истории пока нет.")
         return
+    table_labels = {
+        "exchanges": "💱 Обмен",
+        "expenses": "💸 Расход",
+        "partner_contributions": "➕ Взнос партнёра",
+        "partner_withdrawals": "➖ Вывод партнёра",
+        "poa_withdrawals": "📝 Снятие по дов.",
+        "cabinets": "📦 Кабинет",
+        "prepayments": "💳 Предоплата",
+        "knowledge_base": "🧠 Факт",
+    }
+    action_labels = {
+        "create": "",
+        "status_change": "статус →",
+        "undo": "↩️ откат",
+        "client_paid": "✅ долг закрыт",
+    }
     lines = [f"<b>Последние {len(rows)} операций:</b>"]
     for a in rows:
+        label = table_labels.get(a.table_name, a.table_name)
+        action_label = action_labels.get(a.action, a.action)
+        extra = ""
+        if a.action == "status_change" and a.new_data:
+            extra = f" ({a.new_data.get('status')})"
+        elif a.new_data:
+            # Peek the most useful field of the new_data for the summary
+            d = a.new_data
+            for k in ("amount_rub", "amount_usdt", "summary", "client_name", "category", "name", "cost_rub"):
+                if k in d:
+                    v = d[k]
+                    extra = (
+                        f" {v:.0f}"
+                        if isinstance(v, (int, float))
+                        else f" «{str(v)[:30]}»"
+                    )
+                    break
+        when = a.created_at.strftime("%d.%m %H:%M")
         lines.append(
-            f"  <code>#{a.id}</code>  {a.created_at.strftime('%m-%d %H:%M')}  "
-            f"{a.action} {a.table_name}  rec#{a.record_id}"
+            f"  <code>#{a.id}</code> {when}  {label} {action_label}{extra}"
         )
     await message.answer("\n".join(lines))
 
@@ -549,6 +604,22 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
 # --------------------------------------------------------------------------- #
 # /silent and /report stubs — /report will be replaced in the next commit.
 # --------------------------------------------------------------------------- #
+
+
+@router.message(Command("resync"))
+async def cmd_resync(message: Message) -> None:
+    """Manual resync — reprocess messages from the last 2h through the
+    batch analyzer. Useful if the bot was rebooted and missed a chunk.
+    """
+    from src.core.resync import resync
+
+    await message.reply("Запустил ресинк, подожди 5-15 сек…")
+    triggered = await resync(message.bot)
+    if not triggered:
+        await message.reply("Нечего досинкать — всё уже разобрано.")
+        return
+    summary = ", ".join(f"{cid}: {n} сообщ." for cid, n in triggered.items())
+    await message.reply(f"Готово. Обработано: {summary}")
 
 
 @router.message(Command("voices"))
@@ -649,6 +720,8 @@ async def cmd_avatar(message: Message) -> None:
 
 @router.message(Command("report"))
 async def cmd_report(message: Message) -> None:
+    from decimal import Decimal
+
     from src.core.reports import acquiring_days_ago, generate
 
     if message.from_user is None:
@@ -659,10 +732,21 @@ async def cmd_report(message: Message) -> None:
         acq_ago = await acquiring_days_ago(session)
 
     footer = ""
+    # Empty state warning — all the totals are zero = nothing to report on.
+    if (
+        result.total_wallets_usdt == Decimal("0")
+        and result.total_assets_usdt == Decimal("0")
+        and result.total_liabilities_usdt == Decimal("0")
+    ):
+        footer += (
+            "\n\n<i>⚠️ Всё по нулям. Вероятно ни снапшотов, ни операций в базе нет. "
+            "Кинь в чат остатки кошельков (например: «tapbank 5000, mercurio 48, нал 6000₽»), "
+            "я сохраню снапшот и отчёт наполнится.</i>"
+        )
     if acq_ago is None:
-        footer = "\n\n<i>Эквайринга в базе не было. Если сегодня платили — кинь в чат 'эквайринг 5к' и подтверди.</i>"
+        footer += "\n\n<i>Эквайринга в базе не было. Если сегодня платили — кинь в чат 'эквайринг 5к' и подтверди.</i>"
     elif acq_ago >= 2:
-        footer = (
+        footer += (
             f"\n\n<i>Эквайринг был {acq_ago} дн. назад. Не забыли ли сегодня?</i>"
         )
     await message.answer(result.text + footer)

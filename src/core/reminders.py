@@ -273,6 +273,15 @@ async def _check_pending_op_expiry(bot: Bot) -> None:
         log.exception("pending_op_expiry_failed")
 
 
+async def _maybe_prank(bot: Bot) -> None:
+    from src.core.pranks import maybe_prank
+
+    try:
+        await maybe_prank(bot)
+    except Exception:
+        log.exception("prank_check_failed")
+
+
 _JOBS: list[tuple[str, Any, int]] = [
     # (name, coro, interval_minutes)
     ("report_overdue", _check_report_overdue, 15),
@@ -281,6 +290,7 @@ _JOBS: list[tuple[str, Any, int]] = [
     ("poa_without_exchange", _check_poa_without_exchange, 15),
     ("client_debt_stale", _check_client_debt_stale, 60),
     ("pending_op_expiry", _check_pending_op_expiry, 15),
+    ("maybe_prank", _maybe_prank, 60),
 ]
 
 
