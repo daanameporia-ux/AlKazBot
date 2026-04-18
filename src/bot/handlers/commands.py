@@ -20,6 +20,8 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
+from src.db.repositories import balances as balances_repo
+from src.db.repositories import feedback as feedback_repo
 from src.db.repositories import knowledge as kb_repo
 from src.db.repositories import users as user_repo
 from src.db.session import session_scope
@@ -178,18 +180,145 @@ async def cmd_knowledge(message: Message, command: CommandObject) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# /balance — wallet snapshot (read-only)
+# --------------------------------------------------------------------------- #
+
+
+def _fmt_money(amount, currency: str) -> str:
+    if amount is None:
+        return "—"
+    return f"{amount:,.2f} {currency}".replace(",", " ")
+
+
+@router.message(Command("balance"))
+async def cmd_balance(message: Message, command: CommandObject) -> None:
+    arg = (command.args or "").strip().lower()
+    async with session_scope() as session:
+        items = await balances_repo.latest_wallet_balances(session)
+
+    if arg:
+        items = [w for w in items if w.wallet_code == arg or arg in w.wallet_name.lower()]
+        if not items:
+            await message.reply(f"Кошелька `{arg}` не нашёл.", parse_mode="Markdown")
+            return
+
+    if not any(w.amount_usdt is not None for w in items):
+        await message.answer(
+            "Снапшотов балансов ещё не было — запусти `/report`, там спрошу цифры.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["*Балансы (последний снапшот):*"]
+    total = 0
+    for w in items:
+        native = _fmt_money(w.amount_native, w.currency) if w.amount_native is not None else "—"
+        usdt = _fmt_money(w.amount_usdt, "USDT") if w.amount_usdt is not None else "—"
+        lines.append(f"  `{w.wallet_code:<14}` {w.wallet_name:<22} {native}  →  {usdt}")
+        if w.amount_usdt is not None:
+            total += float(w.amount_usdt)
+    lines.append(f"\n*Итого*: `{total:,.2f}` USDT".replace(",", " "))
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+# --------------------------------------------------------------------------- #
+# /fx — current RUB/USDT rate
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("fx"))
+async def cmd_fx(message: Message) -> None:
+    async with session_scope() as session:
+        snap = await balances_repo.current_fx_rate(session)
+    if snap is None:
+        await message.answer(
+            "Курса ещё нет. Кинь в чат строку вида `517000/6433=80.37` — я запишу.",
+            parse_mode="Markdown",
+        )
+        return
+    await message.answer(
+        f"*Курс*: `{snap.rate:.4f}` ₽/USDT\n"
+        f"_обновлён_: `{snap.rate_date.strftime('%Y-%m-%d %H:%M UTC')}`",
+        parse_mode="Markdown",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# /partners — per-partner running totals
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("partners"))
+async def cmd_partners(message: Message) -> None:
+    async with session_scope() as session:
+        shares = await balances_repo.partner_shares(session)
+    if not shares:
+        await message.answer("Партнёров в базе нет (неожиданно — seed должен был их создать).")
+        return
+    lines = ["*Партнёры — итого:*"]
+    for s in shares:
+        lines.append(
+            f"\n*{s.partner_name}*\n"
+            f"  depo:        `{s.deposits_usdt:>10,.2f}` USDT\n".replace(",", " ")
+            + f"  +snятия:    `{s.contributions_usdt:>10,.2f}` USDT\n".replace(",", " ")
+            + f"  −вывод:     `{s.withdrawals_usdt:>10,.2f}` USDT\n".replace(",", " ")
+            + f"  *net*:       *`{s.net_usdt:>10,.2f}`* USDT".replace(",", " ")
+        )
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+# --------------------------------------------------------------------------- #
+# /feedback — accumulated wishes
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("feedback"))
+async def cmd_feedback(message: Message, command: CommandObject) -> None:
+    args = (command.args or "").strip()
+    # /feedback add <text> — explicit add (in addition to passive listening)
+    if args.startswith("add "):
+        text = args[4:].strip()
+        if len(text) < 3:
+            await message.reply("Слишком коротко. Пиши развёрнуто.")
+            return
+        async with session_scope() as session:
+            me = (
+                await user_repo.get_user_by_tg_id(session, message.from_user.id)
+                if message.from_user
+                else None
+            )
+            fb = await feedback_repo.add(
+                session,
+                message=text,
+                created_by_user_id=me.id if me else None,
+            )
+        await message.reply(f"Записал `#{fb.id}`. Разберёмся потом.", parse_mode="Markdown")
+        return
+
+    async with session_scope() as session:
+        items = await feedback_repo.list_open(session)
+    if not items:
+        await message.answer("Пожеланий пока нет. Добавь: `/feedback add <текст>`.", parse_mode="Markdown")
+        return
+    lines = ["*Пожелания команды:*"]
+    for fb in items:
+        lines.append(f"`#{fb.id}` [{fb.status}] {fb.message[:180]}")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+# --------------------------------------------------------------------------- #
 # Stage 2 stubs — still not implemented, explicit "coming later".
 # --------------------------------------------------------------------------- #
 
-STAGE2_COMMANDS = ("stock", "clients", "client", "debts", "history", "undo", "silent")
+STAGE2_COMMANDS = ("stock", "clients", "client", "debts", "history", "undo", "silent", "report")
 
 
 @router.message(Command(*STAGE2_COMMANDS))
 async def cmd_stage2_stub(message: Message) -> None:
     cmd = (message.text or "").split()[0] if message.text else "?"
     await message.reply(
-        f"{cmd} — эта штука в Этапе 2 (склад / клиенты / доверки). "
-        f"Пока не умею. /help — что уже умею."
+        f"{cmd} — пока не готово. Появится в ближайших коммитах Этапа 1-2. "
+        f"/help — что уже умею."
     )
 
 

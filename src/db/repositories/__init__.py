@@ -5,6 +5,6 @@ argument — no dependency-injection magic, no classes, no ORM-object mutation
 outside the transaction scope.
 """
 
-from src.db.repositories import fx, knowledge, users, wallets
+from src.db.repositories import balances, feedback, fx, knowledge, users, wallets
 
-__all__ = ["fx", "knowledge", "users", "wallets"]
+__all__ = ["balances", "feedback", "fx", "knowledge", "users", "wallets"]
