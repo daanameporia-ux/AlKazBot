@@ -69,7 +69,15 @@ def _strip_mention(text: str, bot_username: str) -> str:
 
 @router.message()
 async def on_mention(message: Message) -> None:
+    print(
+        f"[mentions] entered: chat={message.chat.id} "
+        f"user={message.from_user.id if message.from_user else '?'} "
+        f"has_reply={message.reply_to_message is not None} "
+        f"text={(message.text or '')[:60]!r}",
+        flush=True,
+    )
     if not await _addressed_to_me(message):
+        print("[mentions] not addressed -> skip", flush=True)
         return
 
     me = await message.bot.me()
