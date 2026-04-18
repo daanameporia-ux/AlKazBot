@@ -546,4 +546,30 @@ async def cmd_silent(message: Message) -> None:
     await message.reply("/silent — скоро будет в Этапе 3.")
 
 
+# --------------------------------------------------------------------------- #
+# /report — full end-of-day report
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("report"))
+async def cmd_report(message: Message) -> None:
+    from src.core.reports import acquiring_days_ago, generate
+
+    if message.from_user is None:
+        return
+    async with session_scope() as session:
+        me = await user_repo.get_user_by_tg_id(session, message.from_user.id)
+        result = await generate(session, created_by_user_id=me.id if me else None)
+        acq_ago = await acquiring_days_ago(session)
+
+    footer = ""
+    if acq_ago is None:
+        footer = "\n\n<i>Эквайринга в базе не было. Если сегодня платили — кинь в чат 'эквайринг 5к' и подтверди.</i>"
+    elif acq_ago >= 2:
+        footer = (
+            f"\n\n<i>Эквайринг был {acq_ago} дн. назад. Не забыли ли сегодня?</i>"
+        )
+    await message.answer(result.text + footer)
+
+
 __all__ = ["router"]
