@@ -62,8 +62,8 @@
    | `TELEGRAM_BOT_TOKEN` | токен из Шага 1 |
    | `ANTHROPIC_API_KEY` | ключ из Шага 2 |
    | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` |
-   | `ALLOWED_TG_USER_IDS` | твой TG user ID (через запятую если несколько, см. Шаг 5) |
-   | `OWNER_TG_USER_ID` | твой TG user ID |
+   | `ALLOWED_TG_USER_IDS` | `6885525649,7220305943` (Казах + Арбуз) |
+   | `OWNER_TG_USER_ID` | `6885525649` (Казах) |
    | `APP_ENV` | `prod` |
    | `LOG_LEVEL` | `INFO` |
    | `HYBRID_LISTEN_MODE` | `true` |
@@ -80,13 +80,14 @@
 
 ---
 
-## Шаг 4: Узнать свой Telegram user ID
+## Шаг 4: Telegram user ID — уже зашиты
 
-1. Открой @userinfobot в Telegram → `/start`. Он пришлёт твой ID
-   (число типа `123456789`).
-2. Вставь это число в Railway в переменные `ALLOWED_TG_USER_IDS` и
-   `OWNER_TG_USER_ID` (см. Шаг 3.6). Если уже вставил — проверь.
-3. Railway передеплоится с новыми значениями.
+Твой ID (Казах) `6885525649` и ID Арбуза `7220305943` уже прописаны в
+Шаге 3.6 и засеяны в базу (миграция `c1a00002seed`). Никаких действий
+— пропускаем.
+
+Если надо добавить помощника в whitelist — отредактируй
+`ALLOWED_TG_USER_IDS` в Railway Variables, запятая между ID.
 
 ---
 

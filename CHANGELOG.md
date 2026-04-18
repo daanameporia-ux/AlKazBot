@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- Seed migration `c1a00002seed`: partners (Казах=6885525649 owner,
+  Арбуз=7220305943) and the five working-capital wallets (tapbank,
+  mercurio, rapira, sber_balances, cash). Idempotent via `ON CONFLICT`.
+- `.env.example` and `SETUP.md` personalized with the real TG IDs — no
+  placeholder numbers left to fill in.
+
 ## [0.1.0-stage0] — 2026-04-17
 
 Этап 0 — каркас. Первая версия на Railway, бот отвечает на `/start`,
