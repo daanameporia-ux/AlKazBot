@@ -14,6 +14,7 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import io
 
 from aiogram import F, Router
@@ -58,7 +59,9 @@ async def on_pdf(message: Message) -> None:
 
     pdf_bytes = buf.getvalue()
     try:
-        text = extract_pdf_text(pdf_bytes)
+        # pdfminer is CPU-bound and synchronous — off to a worker thread so
+        # we don't freeze polling while a fat statement is parsed.
+        text = await asyncio.to_thread(extract_pdf_text, pdf_bytes)
     except Exception:
         log.exception("pdf_extract_failed")
         await message.reply(

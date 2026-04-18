@@ -59,6 +59,9 @@ async def attach_exchange(
     """Fill in amount_usdt / client_debt_usdt after an exchange lands.
     Also fan out partner_contributions with source='poa_share'.
     """
+    if fx_rate is None or fx_rate <= 0:
+        raise ValueError(f"invalid fx_rate for poa attach: {fx_rate!r}")
+
     res = await session.execute(
         select(PoAWithdrawal).where(PoAWithdrawal.id == poa_id)
     )

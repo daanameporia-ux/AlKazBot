@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import Cabinet
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 CAB_STATUSES = (
     "in_stock", "in_use", "worked_out", "blocked", "recovered", "lost"
@@ -75,7 +79,7 @@ async def set_status(
         return False
     values: dict = {"status": status}
     if status == "in_use":
-        values["in_use_since"] = extra.get("in_use_since") or datetime.utcnow()
+        values["in_use_since"] = extra.get("in_use_since") or _utcnow()
     if status == "worked_out":
         values["worked_out_date"] = extra.get("worked_out_date") or date.today()
     res = await session.execute(
@@ -96,7 +100,7 @@ async def list_stock(session: AsyncSession) -> list[Cabinet]:
 async def list_in_use_longer_than(
     session: AsyncSession, hours: int
 ) -> list[Cabinet]:
-    threshold = datetime.utcnow() - __import__("datetime").timedelta(hours=hours)
+    threshold = _utcnow() - timedelta(hours=hours)
     res = await session.execute(
         select(Cabinet)
         .where(

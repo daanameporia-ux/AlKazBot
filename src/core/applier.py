@@ -22,6 +22,9 @@ from src.db.repositories import (
     audit as audit_repo,
 )
 from src.db.repositories import (
+    balances as balances_repo,
+)
+from src.db.repositories import (
     cabinets as cabinet_repo,
 )
 from src.db.repositories import (
@@ -77,6 +80,35 @@ def _req_dec(x, field: str) -> Decimal:
     return d
 
 
+def _positive_fx(fx: Decimal | None, *, field: str = "fx_rate") -> Decimal:
+    """Ensure the FX rate is strictly positive — zero/negative would corrupt
+    every downstream amount calculation.
+    """
+    if fx is None or fx <= 0:
+        raise ApplyError(
+            f"Курс {field} невалидный ({fx!r}). Нужен положительный. "
+            "Запиши курс сначала (строка вида '80000/1000=80')."
+        )
+    return fx
+
+
+async def _resolve_fx(
+    session: AsyncSession, provided: Decimal | None
+) -> Decimal:
+    """Pick the fx rate: user-provided wins, otherwise latest snapshot,
+    otherwise raise. No more silent fallback to 1.
+    """
+    if provided is not None:
+        return _positive_fx(provided, field="fx_rate (из операции)")
+    snap = await balances_repo.current_fx_rate(session)
+    if snap is None:
+        raise ApplyError(
+            "Курса нет ни в операции, ни в базе. "
+            "Сначала запиши курс (строка вида '80000/1000=80'), потом эту операцию."
+        )
+    return _positive_fx(snap.rate, field="fx_rate (из базы)")
+
+
 async def apply(
     session: AsyncSession, op: PendingOp, *, created_by_tg_id: int
 ) -> str:
@@ -91,7 +123,7 @@ async def apply(
             session,
             amount_rub=_req_dec(f.get("amount_rub"), "amount_rub"),
             amount_usdt=_req_dec(f.get("amount_usdt"), "amount_usdt"),
-            fx_rate=_req_dec(f.get("fx_rate"), "fx_rate"),
+            fx_rate=_positive_fx(_req_dec(f.get("fx_rate"), "fx_rate")),
             raw_input=op.summary,
             created_by_user_id=user_id,
         )
@@ -102,10 +134,13 @@ async def apply(
         amount_rub = _dec(f.get("amount_rub"))
         amount_usdt = _dec(f.get("amount_usdt"))
         fx = _dec(f.get("fx_rate"))
-        if amount_usdt is None and amount_rub is not None and fx:
-            amount_usdt = amount_rub / fx
         if amount_usdt is None:
-            raise ApplyError("Не смог вычислить сумму расхода в USDT.")
+            if amount_rub is None:
+                raise ApplyError(
+                    "Нужна сумма расхода — хотя бы в рублях или в USDT."
+                )
+            fx = await _resolve_fx(session, fx)
+            amount_usdt = amount_rub / fx
         ex = await expense_repo.create(
             session,
             category=str(f.get("category") or "other"),
@@ -173,12 +208,8 @@ async def apply(
 
     if intent == Intent.CABINET_PURCHASE.value:
         cost_rub = _req_dec(f.get("cost_rub"), "cost_rub")
-        # fx rate inferred from current FX snapshot if not provided
-        from src.db.repositories import balances as balances_repo
-
-        fx_snap = await balances_repo.current_fx_rate(session)
-        fx = _dec(f.get("fx_rate")) or (fx_snap.rate if fx_snap else Decimal("1"))
-        cost_usdt = cost_rub / fx if fx else Decimal("0")
+        fx = await _resolve_fx(session, _dec(f.get("fx_rate")))
+        cost_usdt = cost_rub / fx
         cab = await cabinet_repo.create(
             session,
             name=f.get("name"),
@@ -216,12 +247,9 @@ async def apply(
         return f"⚠️ Кабинет {cab.name or cab.auto_code} помечен заблокированным."
 
     if intent == Intent.PREPAYMENT_GIVEN.value:
-        from src.db.repositories import balances as balances_repo
-
-        fx_snap = await balances_repo.current_fx_rate(session)
-        fx = _dec(f.get("fx_rate")) or (fx_snap.rate if fx_snap else Decimal("1"))
         amount_rub = _req_dec(f.get("amount_rub"), "amount_rub")
-        amount_usdt = amount_rub / fx if fx else Decimal("0")
+        fx = await _resolve_fx(session, _dec(f.get("fx_rate")))
+        amount_usdt = amount_rub / fx
         p = await prepayment_repo.create_pending(
             session,
             supplier=f.get("supplier"),

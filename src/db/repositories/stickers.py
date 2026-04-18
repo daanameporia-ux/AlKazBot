@@ -12,7 +12,7 @@ random pick from recently-seen stickers if no emoji match.
 from __future__ import annotations
 
 import random
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,7 +87,10 @@ async def bump_usage(session: AsyncSession, sticker_id: int) -> None:
     await session.execute(
         update(SeenSticker)
         .where(SeenSticker.id == sticker_id)
-        .values(last_used=datetime.utcnow(), usage_count=SeenSticker.usage_count + 1)
+        .values(
+            last_used=datetime.now(UTC),
+            usage_count=SeenSticker.usage_count + 1,
+        )
     )
 
 
