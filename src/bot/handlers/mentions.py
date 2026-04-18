@@ -17,20 +17,12 @@ from aiogram import Router
 from aiogram.types import Message
 
 from src.bot.batcher import BufferedMessage, get_batch_buffer, is_main_group, now_ts
-from src.db.repositories import knowledge as kb_repo
-from src.db.repositories import users as user_repo
-from src.db.session import session_scope
 from src.logging_setup import get_logger
 
 log = get_logger(__name__)
 router = Router(name="mentions")
 
 
-REMEMBER_RE = re.compile(
-    # DOTALL so the fact body can span multiple lines (users type explanations
-    # with line breaks all the time). `\s*` chews opening punctuation/colons.
-    r"(?isx)\bзапомни\b[\s,:]*(что)?[\s,:\-]*(?P<body>.+?)\s*$",
-)
 
 
 async def _addressed_to_me(message: Message) -> bool:
@@ -99,31 +91,12 @@ async def on_mention(message: Message) -> None:
         await message.reply("Чё?")
         return
 
-    # Fast-path: explicit teach command. `search()` — body may have a leading
-    # newline after the @-mention was stripped, so .match() wouldn't hit.
-    teach = REMEMBER_RE.search(body)
-    if teach:
-        fact = teach.group("body").strip().rstrip(".")
-        if len(fact) < 3:
-            await message.reply("Это не факт, это зевок. Перефразируй.")
-            return
-        async with session_scope() as session:
-            me_user = (
-                await user_repo.get_user_by_tg_id(session, message.from_user.id)
-                if message.from_user
-                else None
-            )
-            stored = await kb_repo.add_fact(
-                session,
-                category="rule",
-                content=fact,
-                confidence="confirmed",
-                created_by_user_id=me_user.id if me_user else None,
-            )
-        await message.reply(
-            f"Записал #{stored.id}: {stored.content}",
-        )
-        return
+    # Teaching commands now go through the batch analyzer like everything
+    # else — Claude picks the right knowledge_base category (alias / entity
+    # / rule / ...), pulls out a key when applicable, and emits a preview
+    # card so the user can ✅ / ❌ just like for operations.
+    #
+    # No more naive regex shortcut dumping everything into 'rule'.
 
     # Flush the batch buffer with the trigger message so the analyzer sees
     # the @/reply + any buffered passive context together, and either

@@ -98,6 +98,13 @@ def render(intent: str, fields: dict[str, Any], summary: str) -> str:
             f"• Клиент:   {fields.get('client_name')}",
             f"• Отдали:   {_fmt_usdt(fields.get('amount_usdt'))}",
         ]
+    elif intent_value == Intent.KNOWLEDGE_TEACH.value:
+        lines += [
+            f"• Категория: <b>{fields.get('category', 'rule')}</b>",
+        ]
+        if fields.get("key"):
+            lines.append(f"• Ключ:      {fields.get('key')}")
+        lines.append(f"• Текст:     {fields.get('content', '')}")
     else:
         lines.append(f"(fields: {fields})")
 

@@ -115,7 +115,15 @@ ANALYZE_TOOL = {
                                 "prepayment_given: {supplier, amount_rub, expected_cabinets?}\n"
                                 "prepayment_fulfilled: {supplier, cabinets:[{name,cost_rub}]}\n"
                                 "wallet_snapshot: {tapbank?, mercurio?, rapira?, sber_balances?, cash?}\n"
-                                "client_payout: {client_name, amount_usdt}"
+                                "client_payout: {client_name, amount_usdt}\n"
+                                "knowledge_teach: {category: 'alias'|'glossary'|'entity'|'rule'|'pattern'|'preference', key?, content}\n"
+                                "  - alias: key=короткая форма, content=канон (\"Арнелле\" → acquiring)\n"
+                                "  - entity: key=имя, content=описание (клиент, поставщик)\n"
+                                "  - rule: content=правило бизнеса\n"
+                                "  - glossary: key=термин, content=значение\n"
+                                "  - pattern: content=типовая формулировка\n"
+                                "  - preference: content=как юзер хочет чтобы бот работал\n"
+                                "  Можно возвращать НЕСКОЛЬКО knowledge_teach в одном batch если юзер накинул несколько фактов."
                             ),
                         },
                         "ambiguities": {
@@ -162,7 +170,8 @@ BATCH_INSTRUCTION = """\
 You receive a list of chat messages from the sber26 accounting team's group.
 Each entry shows the Telegram message_id, author handle, and text. A batch
 may contain multiple separate operations (e.g. one snятие + one exchange +
-one payout), or may be pure chit-chat, or a direct question to the bot.
+one payout), or may be pure chit-chat, or a direct question to the bot,
+or a teaching command ("запомни ...").
 
 Possible sections in the input:
 - `[trigger message ...]` — the message that forced the flush right now
@@ -186,6 +195,35 @@ If there are no operations AND there IS a trigger message:
 If there are no operations AND there's no trigger (purely passive
 analysis of buffered chit-chat): set `chat_only=true`, leave
 `chat_reply` empty. The bot will stay silent.
+
+## Teaching (`knowledge_teach`) specifics
+
+When a user writes something like "запомни: X", "запомни что X", or just
+a plain statement-of-fact about the business ("Миша обычно 22-28к за
+кабинет", "Tpay это TapBank", "эквайринг 5к у нас ежедневно") —
+decompose it into one or MORE `knowledge_teach` entries.
+
+Pick the right `category`:
+- **alias**: two names for the same thing. `key` = short/colloquial,
+  `content` = canonical. Example: key="Арнелле", content="оплата за
+  эквайринг (acquiring)".
+- **entity**: a person / supplier / client / specific object.
+  `key` = name, `content` = description ("приходит раз в 2 недели, суммы
+  50-150к").
+- **rule**: business rule. No key needed, just `content`.
+- **glossary**: term → definition.
+- **pattern**: typical phrasing. No key, `content` = the pattern.
+- **preference**: how the user wants the bot to behave.
+
+If the user cites several facts in one message, split them into
+separate `knowledge_teach` operations. Each one gets its own preview
+card so the user can ✅ / ❌ individually.
+
+If you're unsure between categories or couldn't pull a crisp `key` /
+`content`, set `confidence < 0.7` and list the exact clarifying
+questions in `ambiguities`. The bot will ask first.
+
+## General
 
 Only return operations you are reasonably sure about. It's better to ask
 than to invent. Low confidence (< 0.7) or non-empty `ambiguities` is

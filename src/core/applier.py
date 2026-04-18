@@ -34,6 +34,9 @@ from src.db.repositories import (
     expenses as expense_repo,
 )
 from src.db.repositories import (
+    knowledge as kb_repo,
+)
+from src.db.repositories import (
     partner_ops as partner_repo,
 )
 from src.db.repositories import (
@@ -259,6 +262,27 @@ async def apply(
             new={"amount_usdt": str(f.get("amount_usdt"))},
         )
         return f"✅ Долг перед {client_name} закрыт."
+
+    if intent == Intent.KNOWLEDGE_TEACH.value:
+        category = str(f.get("category") or "rule").lower()
+        allowed = ("alias", "glossary", "entity", "rule", "pattern", "preference")
+        if category not in allowed:
+            category = "rule"
+        content = str(f.get("content") or "").strip()
+        key = f.get("key")
+        if len(content) < 2:
+            raise ApplyError("Пустой факт, записывать нечего.")
+        fact = await kb_repo.add_fact(
+            session,
+            category=category,
+            key=str(key).strip() if key else None,
+            content=content,
+            confidence="confirmed",
+            created_by_user_id=user_id,
+        )
+        await _audit(session, user_id, "create", "knowledge_base", fact.id, new=f)
+        key_part = f" [{fact.key}]" if fact.key else ""
+        return f"✅ Запомнил #{fact.id} ({fact.category}){key_part}: {fact.content[:140]}"
 
     raise ApplyError(f"Intent {intent} пока не реализован на запись.")
 
