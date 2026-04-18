@@ -63,6 +63,7 @@ class BatchBuffer:
         self._buffers: dict[int, list[BufferedMessage]] = {}
         self._timers: dict[int, asyncio.Task[None]] = {}
         self._locks: dict[int, asyncio.Lock] = {}
+        self._inflight: set[asyncio.Task] = set()
 
     def _lock(self, chat_id: int) -> asyncio.Lock:
         lk = self._locks.get(chat_id)
@@ -123,8 +124,13 @@ class BatchBuffer:
             size=len(batch.messages),
             trigger_kind=trigger_kind,
         )
-        # Fire-and-forget so the bot can keep receiving updates.
-        asyncio.create_task(self._safe_flush(batch), name=f"batch-flush-{chat_id}")
+        # Fire-and-forget so the bot can keep receiving updates. Store the
+        # task on the instance to keep a strong reference (RUF006).
+        task = asyncio.create_task(
+            self._safe_flush(batch), name=f"batch-flush-{chat_id}"
+        )
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
 
     async def _safe_flush(self, batch: Batch) -> None:
         try:

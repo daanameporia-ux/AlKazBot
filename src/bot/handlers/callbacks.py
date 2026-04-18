@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
@@ -48,10 +50,8 @@ async def on_confirm(q: CallbackQuery) -> None:
     # the confirmation line.
     if q.message and q.message.text:
         new_text = f"{q.message.html_text}\n\n{reply_text}"
-        try:
+        with contextlib.suppress(Exception):
             await q.message.edit_text(new_text, reply_markup=None)
-        except Exception:
-            pass
     await q.answer("Записал.")
 
 
@@ -69,8 +69,6 @@ async def on_cancel(q: CallbackQuery) -> None:
             if op is not None
             else q.message.html_text or ""
         )
-        try:
+        with contextlib.suppress(Exception):
             await q.message.edit_text(new_text, reply_markup=None)
-        except Exception:
-            pass
     await q.answer("Ок, не записываю.")

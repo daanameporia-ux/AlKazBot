@@ -124,7 +124,7 @@ def main() -> None:
         asyncio.run(_runner())
     except KeyboardInterrupt:
         sys.exit(0)
-    except BaseException as e:  # noqa: BLE001
+    except BaseException as e:
         # Last-ditch visibility on startup-crash in Railway logs.
         print(f"[boot] fatal: {e.__class__.__name__}: {e}", flush=True)
         raise

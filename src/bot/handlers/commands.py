@@ -21,8 +21,11 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
 from src.db.repositories import balances as balances_repo
+from src.db.repositories import cabinets as cabinet_repo
+from src.db.repositories import clients as client_repo
 from src.db.repositories import feedback as feedback_repo
 from src.db.repositories import knowledge as kb_repo
+from src.db.repositories import poa as poa_repo
 from src.db.repositories import users as user_repo
 from src.db.session import session_scope
 from src.logging_setup import get_logger
@@ -307,19 +310,240 @@ async def cmd_feedback(message: Message, command: CommandObject) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Stage 2 stubs — still not implemented, explicit "coming later".
+# /stock — cabinets inventory
 # --------------------------------------------------------------------------- #
 
-STAGE2_COMMANDS = ("stock", "clients", "client", "debts", "history", "undo", "silent", "report")
+
+@router.message(Command("stock"))
+async def cmd_stock(message: Message) -> None:
+    async with session_scope() as session:
+        cabinets = await cabinet_repo.list_stock(session)
+    if not cabinets:
+        await message.answer("Склад пустой.")
+        return
+    by_status: dict[str, list] = {}
+    total_usdt = 0
+    for c in cabinets:
+        by_status.setdefault(c.status, []).append(c)
+        total_usdt += float(c.cost_usdt)
+    lines = ["<b>Склад кабинетов:</b>"]
+    status_title = {
+        "in_stock": "в стоке",
+        "in_use": "в работе",
+        "blocked": "заблокированы",
+    }
+    for status in ("in_stock", "in_use", "blocked"):
+        if status not in by_status:
+            continue
+        lines.append(f"\n<i>{status_title.get(status, status)}</i>:")
+        for c in by_status[status]:
+            name = c.name or c.auto_code
+            lines.append(f"  • {name:<18} {c.cost_usdt:.2f}$")
+    lines.append(f"\n<b>Итого</b>: {total_usdt:.2f}$")
+    await message.answer("\n".join(lines))
 
 
-@router.message(Command(*STAGE2_COMMANDS))
-async def cmd_stage2_stub(message: Message) -> None:
-    cmd = (message.text or "").split()[0] if message.text else "?"
-    await message.reply(
-        f"{cmd} — пока не готово. Появится в ближайших коммитах Этапа 1-2. "
-        f"/help — что уже умею."
-    )
+# --------------------------------------------------------------------------- #
+# /clients and /client <name>
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("clients"))
+async def cmd_clients(message: Message) -> None:
+    async with session_scope() as session:
+        clients = await client_repo.list_all(session)
+    if not clients:
+        await message.answer("Клиентов пока нет.")
+        return
+    lines = ["<b>Клиенты доверенностей:</b>"]
+    for c in clients:
+        lines.append(f"  • {c.name}")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("client"))
+async def cmd_client(message: Message, command: CommandObject) -> None:
+    name = (command.args or "").strip()
+    if not name:
+        await message.reply("Формат: <code>/client Никонов</code>")
+        return
+    async with session_scope() as session:
+        c = await client_repo.get_by_name(session, name)
+        if c is None:
+            await message.reply(f"Клиента «{name}» не нашёл.")
+            return
+        from sqlalchemy import select
+
+        from src.db.models import PoAWithdrawal
+
+        res = await session.execute(
+            select(PoAWithdrawal)
+            .where(PoAWithdrawal.client_id == c.id)
+            .order_by(PoAWithdrawal.id.desc())
+            .limit(20)
+        )
+        poas = list(res.scalars().all())
+    lines = [f"<b>{c.name}</b>"]
+    if not poas:
+        lines.append("Операций ещё не было.")
+    else:
+        total_debt = 0
+        for p in poas:
+            debt = f" долг {p.client_debt_usdt:.2f}$" if p.client_debt_usdt and not p.client_paid else ""
+            paid = " ✔" if p.client_paid else ""
+            lines.append(
+                f"  • {p.withdrawal_date} — {p.amount_rub:.0f}₽"
+                f"{debt}{paid}"
+            )
+            if p.client_debt_usdt and not p.client_paid:
+                total_debt += float(p.client_debt_usdt)
+        if total_debt:
+            lines.append(f"\n<b>Открытый долг</b>: {total_debt:.2f} USDT")
+    await message.answer("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# /debts — all outstanding POA client debts
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("debts"))
+async def cmd_debts(message: Message) -> None:
+    async with session_scope() as session:
+        open_poas = await poa_repo.list_unpaid_client_debts(session)
+        lines = ["<b>Долги клиентам:</b>"]
+        total = 0.0
+        if not open_poas:
+            await message.answer("Долгов нет. Красавцы.")
+            return
+        for p in open_poas:
+            # Lazy client name lookup
+            from sqlalchemy import select
+
+            from src.db.models import Client
+
+            res = await session.execute(
+                select(Client.name).where(Client.id == p.client_id)
+            )
+            name = res.scalar_one()
+            debt = float(p.client_debt_usdt or 0)
+            total += debt
+            lines.append(f"  • {name:<20} {debt:.2f}$  (с {p.withdrawal_date})")
+        lines.append(f"\n<b>Итого</b>: {total:.2f} USDT")
+    await message.answer("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# /history [N] — last N audited operations
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("history"))
+async def cmd_history(message: Message, command: CommandObject) -> None:
+    import contextlib
+
+    limit = 10
+    if command.args:
+        with contextlib.suppress(ValueError):
+            limit = max(1, min(50, int(command.args.strip())))
+    async with session_scope() as session:
+        from sqlalchemy import select
+
+        from src.db.models import AuditLog
+
+        res = await session.execute(
+            select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+        )
+        rows = list(res.scalars().all())
+    if not rows:
+        await message.answer("Истории пока нет.")
+        return
+    lines = [f"<b>Последние {len(rows)} операций:</b>"]
+    for a in rows:
+        lines.append(
+            f"  <code>#{a.id}</code>  {a.created_at.strftime('%m-%d %H:%M')}  "
+            f"{a.action} {a.table_name}  rec#{a.record_id}"
+        )
+    await message.answer("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# /undo <audit_id> — roll back a specific mutation (owner or creator)
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("undo"))
+async def cmd_undo(message: Message, command: CommandObject) -> None:
+    if message.from_user is None:
+        return
+    from src.config import settings as _s
+
+    try:
+        audit_id = int((command.args or "").strip())
+    except (ValueError, TypeError):
+        await message.reply("Формат: <code>/undo 42</code> (id из /history)")
+        return
+    is_owner = message.from_user.id == _s.owner_tg_user_id
+    async with session_scope() as session:
+        from sqlalchemy import delete, select
+
+        from src.db.models import AuditLog
+
+        res = await session.execute(select(AuditLog).where(AuditLog.id == audit_id))
+        entry = res.scalar_one_or_none()
+        if entry is None:
+            await message.reply(f"Нет записи #{audit_id} в аудите.")
+            return
+        # Ownership check: caller is owner OR was the creator of the operation
+        creator_user_id = entry.user_id
+        me = await user_repo.get_user_by_tg_id(session, message.from_user.id)
+        me_user_id = me.id if me else None
+        if not is_owner and me_user_id != creator_user_id:
+            await message.reply("Откатить чужую операцию может только owner.")
+            return
+        if entry.action != "create":
+            await message.reply(
+                f"Откат '{entry.action}' ещё не реализован. Пока умею только create."
+            )
+            return
+        # Best-effort delete by table + record_id (hard delete; audit row
+        # stays for trace).
+        table = entry.table_name
+        rid = entry.record_id
+        from src.db.models import (
+            Cabinet,
+            Exchange,
+            Expense,
+            PartnerContribution,
+            PartnerWithdrawal,
+            PoAWithdrawal,
+            Prepayment,
+        )
+        table_map = {
+            "exchanges": Exchange,
+            "expenses": Expense,
+            "partner_contributions": PartnerContribution,
+            "partner_withdrawals": PartnerWithdrawal,
+            "poa_withdrawals": PoAWithdrawal,
+            "cabinets": Cabinet,
+            "prepayments": Prepayment,
+        }
+        model = table_map.get(table)
+        if model is None or rid is None:
+            await message.reply(f"Не знаю как откатить таблицу `{table}`.")
+            return
+        await session.execute(delete(model).where(model.id == rid))
+    await message.reply(f"Откатил аудит #{audit_id} ({table} #{rid}).")
+
+
+# --------------------------------------------------------------------------- #
+# /silent and /report stubs — /report will be replaced in the next commit.
+# --------------------------------------------------------------------------- #
+
+
+@router.message(Command("silent"))
+async def cmd_silent(message: Message) -> None:
+    await message.reply("/silent — скоро будет в Этапе 3.")
 
 
 __all__ = ["router"]
