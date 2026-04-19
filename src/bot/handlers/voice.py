@@ -1,11 +1,13 @@
-"""Voice-note intake — store OGG bytes in Postgres for later transcription.
+"""Voice-note intake.
 
-Real transcription is done out-of-band in a Claude Code session
-(scripts/transcribe_voices.py) — we just capture here.
+Stores the OGG bytes in Postgres, then fires a background task that
+transcribes the voice and immediately runs the batch analyzer with the
+voice as a trigger — so every voice gets an answer just like text does.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 
 from aiogram import F, Router
@@ -60,11 +62,27 @@ async def on_voice(message: Message) -> None:
             mime_type=voice.mime_type,
             ogg_data=data,
         )
+        voice_id = v.id
     log.info(
         "voice_stored",
-        voice_id=v.id,
+        voice_id=voice_id,
         duration=voice.duration,
         size=len(data),
         user=message.from_user.id,
     )
-    # No auto-reply — the whole point is to stash and transcribe later.
+
+    # Fire-and-forget: transcribe now (not in 5 min) and trigger the batch
+    # analyzer with the voice as a trigger message. Every voice gets an
+    # answer same as text.
+    from src.core.voice_trigger import transcribe_and_trigger
+
+    task = asyncio.create_task(
+        transcribe_and_trigger(message.bot, voice_id),
+        name=f"voice-trigger-{voice_id}",
+    )
+    # Keep a ref so GC doesn't eat the task.
+    _pending_voice_tasks.add(task)
+    task.add_done_callback(_pending_voice_tasks.discard)
+
+
+_pending_voice_tasks: set[asyncio.Task] = set()
