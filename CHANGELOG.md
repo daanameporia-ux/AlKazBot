@@ -2,6 +2,72 @@
 
 ## [Unreleased]
 
+## [0.3.0-audit] — 2026-04-19
+
+Full audit pass + voice features + behaviour tuning.
+
+### Added
+- **Voice note support.** Bot captures `F.voice` into a new
+  `voice_messages` table (OGG bytea + metadata). Two new ways to get
+  the bot to act on a voice:
+    1. Record voice, then reply to it with `@Al_Kazbot` — bot
+       transcribes that exact voice and feeds the text into the
+       analyzer before answering.
+    2. Record voice, then send a bare `@Al_Kazbot` right after — bot
+       picks the most-recent untranscribed voice from the same user in
+       the same chat (within 10 min) and does the same.
+- **Inline transcription runtime.** `faster-whisper` (`small`, int8,
+  ru) runs inside the Railway container. Model is pre-downloaded at
+  Docker build time so the first in-chat call doesn't stall.
+- **Periodic voice backfill.** APScheduler job every 5 min scans the
+  `voice_messages` queue and transcribes up to 5 rows per tick. A
+  second job every 6 h force-wipes OGG bytes older than 72 h that
+  never got transcribed (Postgres bloat ceiling).
+- **`/voices` command** — shows the pending transcription count.
+- **`scripts/transcribe_voices.py`** — still works as a manual
+  fallback when running outside Railway (dev laptop).
+
+### Fixed (audit pass)
+- **POA partner-share validation.** `apply()` now enforces that the
+  sum of partner shares + client_share_pct equals 100 % (±0.5 %
+  tolerance). Missing / empty / zero-pct shares reject the op
+  with a clear Russian error. Prevents silent underpayment.
+- **/undo cascade.** Rolling back a `poa_withdrawals` row now also
+  deletes the `partner_contributions` fanned out by
+  `attach_exchange`. `wallet_snapshots` added to the supported
+  table map. The rollback audit row now records what cascaded.
+- **Media routing shadow.** `mentions` and `messages` catch-alls now
+  filter on `F.text | F.caption` so voice / photo / document /
+  sticker messages reach their own routers.
+- **Router registration order** — media routers register before the
+  text catch-alls.
+
+### Added (audit + enrichment)
+- **Perf indexes** (migration `e2a00006idx`):
+  `partner_contributions(source, source_ref_id)`,
+  `poa_withdrawals(client_paid, withdrawal_date)`,
+  `message_log(chat_id, created_at DESC)`,
+  `voice_messages(created_at) WHERE transcribed_text IS NULL`,
+  `audit_log(table_name, record_id)`.
+- **KB enrichment (v2)** — 12 more seeded facts: Никонов / Миша
+  entities, залог / нотариалка / отработать / додеп glossary,
+  rules about share-sum enforcement and prepayment fulfilment,
+  patterns for "откуп" and "сняли с X", preferences on report
+  formatting.
+
+### Behaviour tuning from prod logs
+- `CORE_INSTRUCTIONS` grew a "CRITICAL formats" section spelling out
+  the X/Y=Z = RUB/USDT/fx_rate convention after the LLM swapped the
+  last two values on a live exchange record.
+- Seeded 12 critical KB facts (aliases for рапа / пятерик / нал /
+  Tpay / Merk / додеп, X/Y=Z pattern, POA share rule, acquiring
+  daily rule, arithmetic precheck preference).
+
+### Tests
+- 5 new POA-validation tests (sums, zero pct, empty partner, exact
+  100 %).
+- Total test count: **44 green**.
+
 ### Added
 - Seed migration `c1a00002seed`: partners (Казах=6885525649 owner,
   Арбуз=7220305943) and the five working-capital wallets (tapbank,
