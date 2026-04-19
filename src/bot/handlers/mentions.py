@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import re
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.types import Message
 
 from src.bot.batcher import BufferedMessage, get_batch_buffer, is_main_group, now_ts
+from src.bot.filters.addressed import AddressedToMe
 from src.core.voice_transcribe import (
     find_recent_voice_by_user,
     find_voice_by_message_id,
@@ -88,45 +89,18 @@ async def _transcribe_linked_voice(message: Message) -> None:
             log.exception("inline_voice_transcribe_failed", voice_id=voice_row.id)
 
 
-async def _addressed_to_me(message: Message) -> bool:
-    """True when the user is talking to the bot — either by @-mention in text,
-    by classic reply (`reply_to_message`) to one of the bot's messages, or by
-    Bot-API-7.0+ external reply / quote pointing at the bot.
-
-    A reply thread — in any shape Telegram encodes it — IS explicit address.
-    """
-    me = await message.bot.me()
-    text = message.text or message.caption or ""
-    text_lower = text.lower()
-    mention = bool(text and f"@{me.username}".lower() in text_lower)
-
-    rpy = message.reply_to_message
-    reply_to_bot = bool(rpy and rpy.from_user and rpy.from_user.id == me.id)
-
-    # Bot API 7.0 — external reply / quote (used when Telegram encodes
-    # replies to out-of-history messages or "reply with quote" UX).
-    ext = getattr(message, "external_reply", None)
-    ext_sender = None
-    if ext is not None:
-        origin = getattr(ext, "origin", None)
-        ext_sender = getattr(origin, "sender_user", None) if origin else None
-    ext_reply_to_bot = bool(ext_sender and ext_sender.id == me.id)
-
-    return mention or reply_to_bot or ext_reply_to_bot
-
-
 def _strip_mention(text: str, bot_username: str) -> str:
     return re.sub(rf"(?i)@{re.escape(bot_username)}", "", text).strip()
 
 
-# Filter on text/caption only — otherwise this catch-all handler
-# short-circuits routing before voice/photo/document/sticker routers get a
-# chance to fire.
-@router.message(F.text | F.caption)
+# Use the AddressedToMe filter so this router only matches when the message
+# is actually aimed at the bot (@-mention, reply, or external_reply). Anything
+# else falls through to `messages.on_message` where the keyword gate lives.
+# Previously we matched on `F.text | F.caption` which shadowed the messages
+# router entirely — all plain text short-circuited here and `_addressed_to_me`
+# silently dropped it, so the keyword matcher never ran.
+@router.message(AddressedToMe())
 async def on_mention(message: Message) -> None:
-    if not await _addressed_to_me(message):
-        return
-
     me = await message.bot.me()
     raw = message.text or message.caption or ""
     body = _strip_mention(raw, me.username or "")
