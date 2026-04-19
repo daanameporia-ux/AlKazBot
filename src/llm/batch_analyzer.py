@@ -37,6 +37,7 @@ from sqlalchemy import select
 from src.bot.batcher import Batch
 from src.db.models import MessageLog
 from src.db.repositories import few_shot as few_shot_repo
+from src.db.repositories import stickers as sticker_repo
 from src.db.session import session_scope
 from src.llm.client import complete
 from src.llm.schemas import Intent
@@ -63,6 +64,7 @@ class BatchAnalysis(BaseModel):
     operations: list[BatchOperation] = Field(default_factory=list)
     chat_only: bool = False
     chat_reply: str | None = None
+    sticker_emoji: str | None = None
     notes: str | None = None
 
 
@@ -156,6 +158,21 @@ ANALYZE_TOOL = {
                     "bot, or a question). Must follow the personality/tone "
                     "spec. Leave empty when there's no trigger (passive "
                     "analysis should stay silent unless there are operations)."
+                ),
+            },
+            "sticker_emoji": {
+                "type": "string",
+                "description": (
+                    "Optional emoji picking a sticker from the bot's "
+                    "sticker library. When set, the server resolves it to "
+                    "an actual sticker (matching `emoji` in `seen_stickers`) "
+                    "and sends it alongside or instead of `chat_reply`. "
+                    "Use sparingly — only when a sticker is genuinely the "
+                    "funniest / most on-point reaction for the moment. "
+                    "If no sticker matches the emoji in our library, the "
+                    "bot falls back to sending only `chat_reply`. "
+                    "See the 'Стикеры' block in the system prompt for the "
+                    "current emoji spectrum available."
                 ),
             },
             "notes": {
@@ -292,6 +309,28 @@ async def _collect_few_shot() -> list[dict[str, Any]]:
     return out
 
 
+async def _collect_sticker_context() -> tuple[
+    list[tuple[str, list[str]]], list[dict[str, Any]]
+]:
+    """Pull (pack_emoji_summary, usage_examples) for the Stickers system
+    block. Empty-safe — returns ([], []) if the library is bare."""
+    async with session_scope() as session:
+        packs = await sticker_repo.pack_emoji_summary(session, pack_limit=10)
+        rows = await sticker_repo.recent_usage_examples(
+            session, limit=10, humans_only=True
+        )
+    examples = [
+        {
+            "who": str(r.tg_user_id) if r.tg_user_id else "?",
+            "emoji": r.emoji or "?",
+            "pack": r.sticker_set,
+            "preceding_text": r.preceding_text,
+        }
+        for r in rows
+    ]
+    return packs, examples
+
+
 async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
     """Pull last N messages from message_log (including bot replies) so the
     analyzer has conversation context. Messages that are already part of
@@ -349,11 +388,17 @@ async def analyze_batch(
     # Pull a mix of verified examples across the most likely intents.
     few_shot_items = await _collect_few_shot()
 
-    # `recent_history` is the non-cached 4th system block — it changes every
-    # request, so we keep the first 3 blocks cached and put history here.
+    # Sticker library + usage examples so Claude knows which emojis are
+    # actually resolvable, and in what contexts the team typically reacts.
+    sticker_packs, sticker_examples = await _collect_sticker_context()
+
+    # `recent_history` is the non-cached last system block — it changes every
+    # request, so we keep the cached sections ahead of it.
     system_blocks = build_system_blocks(
         knowledge_items=knowledge_items,
         few_shot_examples=few_shot_items,
+        sticker_pack_emojis=sticker_packs,
+        sticker_usage_examples=sticker_examples,
         recent_messages=recent_history or None,
     )
 

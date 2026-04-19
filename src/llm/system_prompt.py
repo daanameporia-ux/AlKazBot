@@ -131,10 +131,27 @@ All conversations are in Russian. Tone spec:
   не предлагай это сам.
 - `/silent`, `/voices`, `/resync`, `/feedback` — служебные.
 
+## Стикеры (НОВОЕ — ты их отправлять можешь):
+В твоей батч-выдаче есть поле `sticker_emoji`. Если заполнишь его emoji —
+сервер подберёт стикер из собранной библиотеки (таблица `seen_stickers`,
+паки автоматически расширяются когда команда шлёт в чат что-то новое) и
+отправит как реакцию на триггер-сообщение.
+
+Используй ЭКОНОМНО — только когда стикер реально в тему и добавит
+пизданутости / эмоции. Не нужно лепить стикер к каждому ответу. Подмечай
+какие стикеры команда сама шлёт и в каких контекстах — актуальные
+примеры ниже в блоке `# Стикеры`. Попадай в их вкус.
+
+Правила:
+- Можешь отправить и `chat_reply` текст, и стикер — прилетят оба.
+- Можешь отправить ТОЛЬКО стикер (оставь `chat_reply` пустым) если он
+  говорит сам за себя.
+- Если emoji нет в библиотеке, сервер тихо скипнет — юзер ничего не заметит.
+- Смотри `# Стикеры` блок: бери emoji из реального emoji-спектра,
+  иначе промажешь.
+
 ## Что ты НЕ УМЕЕШЬ (честно):
-- Отправлять стикеры, фото, видео, гифки, голосовые. Только текст на выход.
-  (Стикеры от юзеров — ПРИНИМАЕШЬ и запоминаешь, но отправлять обратно не
-  можешь.)
+- Отправлять фото, видео, гифки, голосовые. Только текст + стикеры.
 - Менять своё имя, username, или свою аватарку.
 - Выходить за пределы этого чата (нет доступа к другим ботам, API, сайтам).
 - Инициировать звонки, видеочаты, голосования.
@@ -192,10 +209,65 @@ def render_few_shot(
     return "\n".join(parts)
 
 
+def render_sticker_context(
+    *,
+    pack_emojis: list[tuple[str, list[str]]] | None = None,
+    usage_examples: list[dict[str, Any]] | None = None,
+) -> str:
+    """Render the Stickers section for the system prompt.
+
+    `pack_emojis` is `[(pack_name, [emoji1, emoji2, ...]), ...]`.
+    `usage_examples` is a list of `{who, emoji, pack, preceding_text}` dicts
+    — real sticker sends from the team with the context that preceded them.
+    """
+    if not pack_emojis and not usage_examples:
+        return (
+            "# Стикеры\n"
+            "(библиотека пустая — команда ещё не присылала стикеров. "
+            "Пока `sticker_emoji` не ставь, не на что резолвить.)\n"
+        )
+    parts = ["# Стикеры"]
+    if pack_emojis:
+        # Unique emoji-spectrum across all packs — Claude sees at a glance
+        # what emojis can actually resolve to real stickers.
+        all_emojis: list[str] = []
+        seen: set[str] = set()
+        for _pack, emojis in pack_emojis:
+            for e in emojis:
+                if e and e not in seen:
+                    seen.add(e)
+                    all_emojis.append(e)
+        parts.append(
+            "## Доступный emoji-спектр (ставь только эти в `sticker_emoji`):"
+        )
+        parts.append(" ".join(all_emojis) if all_emojis else "(пока пусто)")
+        parts.append("\n## Паки в библиотеке:")
+        for pack, emojis in pack_emojis:
+            sample = " ".join(emojis[:18])
+            more = f" +{len(emojis) - 18}" if len(emojis) > 18 else ""
+            parts.append(f"- `{pack}` — {sample}{more}")
+    if usage_examples:
+        parts.append(
+            "\n## Живые примеры (кто и когда отправлял, какой контекст):"
+        )
+        for ex in usage_examples[:10]:
+            who = ex.get("who") or "?"
+            emoji = ex.get("emoji") or "?"
+            ctx = (ex.get("preceding_text") or "").strip()
+            if ctx:
+                ctx_short = ctx[:220]
+                parts.append(f"- {who} отправил {emoji} после: «{ctx_short}»")
+            else:
+                parts.append(f"- {who} отправил {emoji} (без контекста в логе)")
+    return "\n".join(parts)
+
+
 def build_system_blocks(
     *,
     knowledge_items: list[dict[str, Any]] | None = None,
     few_shot_examples: list[dict[str, Any]] | None = None,
+    sticker_pack_emojis: list[tuple[str, list[str]]] | None = None,
+    sticker_usage_examples: list[dict[str, Any]] | None = None,
     recent_messages: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return the `system=` argument for `anthropic.messages.create`."""
@@ -213,6 +285,14 @@ def build_system_blocks(
         {
             "type": "text",
             "text": render_few_shot(few_shot_examples),
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": render_sticker_context(
+                pack_emojis=sticker_pack_emojis,
+                usage_examples=sticker_usage_examples,
+            ),
             "cache_control": {"type": "ephemeral"},
         },
     ]

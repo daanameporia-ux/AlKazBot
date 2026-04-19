@@ -20,11 +20,78 @@ from src.bot.middlewares.logging import log_bot_reply
 from src.core import pending_ops, silent
 from src.core.preview import render_op_card
 from src.db.repositories import knowledge as kb_repo
+from src.db.repositories import stickers as sticker_repo
 from src.db.session import session_scope
 from src.llm.batch_analyzer import analyze_batch
 from src.logging_setup import get_logger
 
 log = get_logger(__name__)
+
+
+async def _maybe_send_sticker(
+    bot: Bot,
+    *,
+    chat_id: int,
+    reply_to: int | None,
+    emoji: str | None,
+) -> None:
+    """If the analyzer returned a `sticker_emoji`, pick a sticker from our
+    library whose `emoji` matches and send it. Silent no-op when emoji is
+    empty or no sticker matches — `chat_reply` (if any) still went
+    through separately.
+    """
+    if not emoji:
+        return
+    async with session_scope() as session:
+        chosen = await sticker_repo.pick_by_emoji(session, [emoji])
+        if chosen is None:
+            # Try emoji variants: strip ZWJ / variation selectors, or
+            # look into the bucket by first character.
+            stripped = "".join(
+                ch for ch in emoji
+                if not (0xFE00 <= ord(ch) <= 0xFE0F or ord(ch) == 0x200D)
+            )
+            if stripped and stripped != emoji:
+                chosen = await sticker_repo.pick_by_emoji(session, [stripped])
+        if chosen is None:
+            log.info("sticker_emoji_no_match", emoji=emoji)
+            return
+        try:
+            sent = await bot.send_sticker(
+                chat_id=chat_id,
+                sticker=chosen.file_id,
+                reply_to_message_id=reply_to,
+            )
+        except Exception:
+            log.exception("sticker_send_failed", emoji=emoji)
+            return
+        await sticker_repo.bump_usage(session, chosen.id)
+        # Log in sticker_usage so future prompts see what the bot sends.
+        await sticker_repo.log_usage(
+            session,
+            sticker_file_unique_id=chosen.file_unique_id,
+            sticker_set=chosen.sticker_set,
+            emoji=chosen.emoji,
+            tg_user_id=None,
+            chat_id=chat_id,
+            tg_message_id=sent.message_id,
+            preceding_text=None,
+            sent_by_bot=True,
+        )
+        # Record in message_log so the analyzer's recent history sees it
+        # (otherwise Claude wouldn't know it already reacted).
+        await log_bot_reply(
+            chat_id=chat_id,
+            tg_message_id=sent.message_id,
+            text=f"[sticker {chosen.emoji or '?'}]",
+            intent_hint="sticker_reply",
+        )
+        log.info(
+            "sticker_sent",
+            emoji=emoji,
+            pack=chosen.sticker_set,
+            file_unique_id=chosen.file_unique_id,
+        )
 
 
 def _confirm_kb(uid: str) -> InlineKeyboardMarkup:
@@ -100,6 +167,20 @@ def make_flush_handler(bot: Bot):
                     )
                 except Exception:
                     log.exception("chat_reply_send_failed")
+            # Sticker reaction — fires whether or not chat_reply landed.
+            # Attaches to the trigger message so the reply-thread stays
+            # anchored on what the user said.
+            try:
+                await _maybe_send_sticker(
+                    bot,
+                    chat_id=batch.chat_id,
+                    reply_to=(
+                        batch.trigger.tg_message_id if batch.trigger else None
+                    ),
+                    emoji=analysis.sticker_emoji,
+                )
+            except Exception:
+                log.exception("sticker_emoji_handling_failed")
             return
 
         created_by = (

@@ -106,3 +106,77 @@ async def known_sets(session: AsyncSession) -> list[str]:
         .distinct()
     )
     return [r for (r,) in res.all() if r]
+
+
+# --------------------------------------------------------------------------- #
+# Sticker-usage log — what the team / bot actually sends, with context.
+# Lives in the same module so callers don't need a second import.
+# --------------------------------------------------------------------------- #
+
+from src.db.models import StickerUsage  # noqa: E402
+
+
+async def log_usage(
+    session: AsyncSession,
+    *,
+    sticker_file_unique_id: str | None,
+    sticker_set: str | None,
+    emoji: str | None,
+    tg_user_id: int | None,
+    chat_id: int | None,
+    tg_message_id: int | None,
+    preceding_text: str | None,
+    sent_by_bot: bool = False,
+) -> StickerUsage:
+    row = StickerUsage(
+        sticker_file_unique_id=sticker_file_unique_id,
+        sticker_set=sticker_set,
+        emoji=emoji,
+        tg_user_id=tg_user_id,
+        chat_id=chat_id,
+        tg_message_id=tg_message_id,
+        preceding_text=(preceding_text or "")[:2000] or None,
+        sent_by_bot=sent_by_bot,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def recent_usage_examples(
+    session: AsyncSession, *, limit: int = 12, humans_only: bool = True
+) -> list[StickerUsage]:
+    """Pull last N sticker-usage rows (defaults to human-sent only) so the
+    system prompt can show the bot what contexts the team reacts to.
+    """
+    q = select(StickerUsage).order_by(StickerUsage.id.desc()).limit(limit)
+    if humans_only:
+        q = q.where(StickerUsage.sent_by_bot.is_(False))
+    res = await session.execute(q)
+    return list(res.scalars().all())
+
+
+async def pack_emoji_summary(
+    session: AsyncSession, *, pack_limit: int = 10
+) -> list[tuple[str, list[str]]]:
+    """Per-pack emoji spectrum — returns `[(pack_name, [emoji1, emoji2, ...]), ...]`
+    sorted by pack size descending, capped at `pack_limit` packs.
+
+    Used to render a compact "available stickers" block into the system
+    prompt so Claude knows what emoji slots actually resolve to real
+    stickers in our library.
+    """
+    res = await session.execute(
+        select(SeenSticker.sticker_set, SeenSticker.emoji).where(
+            SeenSticker.sticker_set.isnot(None)
+        )
+    )
+    by_pack: dict[str, set[str]] = {}
+    for pack, emoji in res.all():
+        if not pack:
+            continue
+        by_pack.setdefault(pack, set())
+        if emoji:
+            by_pack[pack].add(emoji)
+    ranked = sorted(by_pack.items(), key=lambda kv: -len(kv[1]))
+    return [(p, sorted(e)) for p, e in ranked[:pack_limit]]

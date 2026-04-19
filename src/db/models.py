@@ -523,6 +523,42 @@ class SeenSticker(Base):
     usage_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
+class StickerUsage(Base):
+    """Log of every sticker sent (by humans AND by the bot) with chat
+    context.
+
+    The bot uses these rows to *learn*: which stickers map to which kinds
+    of preceding messages, so when Claude decides a sticker reaction is
+    warranted it has evidence of what usually lands in a given mood.
+
+    `preceding_text` is the concatenated last ~3 messages before the
+    sticker (truncated to ~600 chars) — cheap context to surface in the
+    system prompt's "sticker examples" block.
+    """
+
+    __tablename__ = "sticker_usage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sticker_file_unique_id: Mapped[str | None] = mapped_column(
+        Text, index=True
+    )
+    sticker_set: Mapped[str | None] = mapped_column(Text, index=True)
+    emoji: Mapped[str | None] = mapped_column(Text, index=True)
+    tg_user_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    preceding_text: Mapped[str | None] = mapped_column(Text)
+    sent_by_bot: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+
 __all__ = [
     "AuditLog",
     "Base",
@@ -542,7 +578,11 @@ __all__ = [
     "PoAWithdrawal",
     "Prepayment",
     "Report",
+    "SeenSticker",
+    "StickerUsage",
+    "TriggerKeyword",
     "User",
+    "VoiceMessage",
     "Wallet",
     "WalletSnapshot",
 ]
