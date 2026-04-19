@@ -213,13 +213,38 @@ async def apply(
         client_name = str(f.get("client_name") or "").strip()
         if not client_name:
             raise ApplyError("Не указано имя клиента.")
+        client_share_pct = _req_dec(f.get("client_share_pct"), "client_share_pct")
+        partner_shares_raw = list(f.get("partner_shares") or [])
+
+        # Validate each share and total — must sum to 100 - client_share_pct
+        clean_shares: list[dict[str, Any]] = []
+        total_share = Decimal("0")
+        for s in partner_shares_raw:
+            pname = str(s.get("partner") or "").strip()
+            pct = _dec(s.get("pct"))
+            if not pname or pct is None or pct <= 0:
+                raise ApplyError(
+                    f"Некорректная доля партнёра: {s!r}. "
+                    "Пример: {'partner': 'Казах', 'pct': 20}."
+                )
+            clean_shares.append({"partner": pname, "pct": str(pct)})
+            total_share += pct
+        expected_sum = Decimal("100") - client_share_pct
+        # Allow 0.5% tolerance to not choke on rounding.
+        if abs(total_share - expected_sum) > Decimal("0.5"):
+            raise ApplyError(
+                f"Доли партнёров {total_share}% + клиент {client_share_pct}% "
+                f"= {total_share + client_share_pct}%, должно быть 100%. "
+                "Уточни и повтори."
+            )
+
         c = await client_repo.get_or_create(session, client_name)
         poa = await poa_repo.create_pending(
             session,
             client_id=c.id,
             amount_rub=_req_dec(f.get("amount_rub"), "amount_rub"),
-            partner_shares=list(f.get("partner_shares") or []),
-            client_share_pct=_req_dec(f.get("client_share_pct"), "client_share_pct"),
+            partner_shares=clean_shares,
+            client_share_pct=client_share_pct,
             notes=op.summary,
             created_by_user_id=user_id,
         )

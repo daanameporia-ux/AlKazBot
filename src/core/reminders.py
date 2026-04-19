@@ -282,6 +282,48 @@ async def _maybe_prank(bot: Bot) -> None:
         log.exception("prank_check_failed")
 
 
+async def _transcribe_pending_voices(bot: Bot) -> None:
+    """Run the local faster-whisper over any voice_messages that haven't
+    been transcribed yet. Wipes OGG bytes as part of transcribe_voice_row.
+    Cap to 5 per tick to stay polite on CPU.
+    """
+    from src.core.voice_transcribe import transcribe_voice_row
+    from src.db.repositories import voice as voice_repo
+
+    async with session_scope() as session:
+        pending = await voice_repo.list_pending(session, limit=5)
+    for row in pending:
+        try:
+            async with session_scope() as session:
+                text = await transcribe_voice_row(session, row.id)
+            log.info("voice_auto_transcribed", voice_id=row.id, chars=len(text or ""))
+        except Exception:
+            log.exception("voice_auto_transcribe_failed", voice_id=row.id)
+
+
+async def _wipe_stale_voice_ogg(bot: Bot) -> None:
+    """Backstop — if a voice never got transcribed within 72h, zero out
+    the OGG blob anyway so Postgres doesn't balloon from stale audio.
+    """
+    from sqlalchemy import update
+
+    from src.db.models import VoiceMessage
+
+    cutoff = _utcnow() - timedelta(hours=72)
+    async with session_scope() as session:
+        res = await session.execute(
+            update(VoiceMessage)
+            .where(
+                VoiceMessage.created_at < cutoff,
+                VoiceMessage.transcribed_text.is_(None),
+                VoiceMessage.ogg_data != b"",
+            )
+            .values(ogg_data=b"")
+        )
+        if res.rowcount:
+            log.info("voice_ogg_wiped_stale", count=res.rowcount)
+
+
 _JOBS: list[tuple[str, Any, int]] = [
     # (name, coro, interval_minutes)
     ("report_overdue", _check_report_overdue, 15),
@@ -291,6 +333,8 @@ _JOBS: list[tuple[str, Any, int]] = [
     ("client_debt_stale", _check_client_debt_stale, 60),
     ("pending_op_expiry", _check_pending_op_expiry, 15),
     ("maybe_prank", _maybe_prank, 60),
+    ("transcribe_pending_voices", _transcribe_pending_voices, 5),
+    ("wipe_stale_voice_ogg", _wipe_stale_voice_ogg, 360),
 ]
 
 

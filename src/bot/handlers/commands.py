@@ -572,6 +572,8 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
             return
         table = entry.table_name
         rid = entry.record_id
+        from src.db.models import WalletSnapshot
+
         table_map = {
             "exchanges": Exchange,
             "expenses": Expense,
@@ -581,11 +583,27 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
             "cabinets": Cabinet,
             "prepayments": Prepayment,
             "knowledge_base": KnowledgeBase,
+            "wallet_snapshots": WalletSnapshot,
         }
         model = table_map.get(table)
         if model is None or rid is None:
             await message.reply(f"Не знаю как откатить таблицу `{table}`.")
             return
+
+        # Cascade for POA: drop the partner_contributions that were
+        # fanned out from this POA when the exchange landed, so totals
+        # don't stay inflated after rollback.
+        cascaded: list[str] = []
+        if table == "poa_withdrawals":
+            res_c = await session.execute(
+                delete(PartnerContribution).where(
+                    PartnerContribution.source == "poa_share",
+                    PartnerContribution.source_ref_id == rid,
+                )
+            )
+            if res_c.rowcount:
+                cascaded.append(f"partner_contributions x{res_c.rowcount}")
+
         await session.execute(delete(model).where(model.id == rid))
         # Trail: record the rollback itself as a separate audit row so
         # /history shows both the create and the undo.
@@ -596,9 +614,10 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
             table_name=table,
             record_id=rid,
             old_data=entry.new_data,
-            new_data={"reverted_audit_id": audit_id},
+            new_data={"reverted_audit_id": audit_id, "cascaded": cascaded},
         )
-    await message.reply(f"Откатил аудит #{audit_id} ({table} #{rid}).")
+    extra = f" + {', '.join(cascaded)}" if cascaded else ""
+    await message.reply(f"Откатил аудит #{audit_id} ({table} #{rid}){extra}.")
 
 
 # --------------------------------------------------------------------------- #
