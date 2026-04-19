@@ -63,8 +63,14 @@ source scripts/load-secrets.sh  # if you've stashed it, else pull from Railway e
 
 ## Where to read up when you're new
 
-- `sber26-bot-SPEC.md` — product spec.
-- `DECISIONS.md` — architectural decisions log.
+**Start here**: `инструкции/README.md` — the comprehensive project guide,
+covering architecture, data model, flows, env vars, Railway infra, how
+to add features, full troubleshooting runbook. If you read nothing else,
+read this. It's written specifically to onboard LLM agents in one file.
+
+Supplementary:
+- `sber26-bot-SPEC.md` — product spec (business side).
+- `DECISIONS.md` — architectural decision log.
 - `CHANGELOG.md` — release notes.
 - `SESSION_HANDOFF.md` — last-session snapshot (may be stale).
-- `инструкции/` — accumulated session dumps & how-tos.
+- `инструкции/СЕССИЯ_*.md` — archived per-session dumps.
