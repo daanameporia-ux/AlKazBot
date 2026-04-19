@@ -239,13 +239,23 @@ def _format_batch(batch: Batch) -> str:
     parts = []
     if batch.trigger is not None:
         t = batch.trigger
+        text = t.text
+        voice_note = ""
+        if text.startswith("[voice]"):
+            text = text.removeprefix("[voice]").strip()
+            voice_note = " (транскрипция голосового)"
         parts.append(
-            f"[trigger message ({batch.trigger_kind}), id={t.tg_message_id}] "
-            f"{t.display_name or t.tg_user_id}: {t.text}"
+            f"[trigger message ({batch.trigger_kind}){voice_note}, "
+            f"id={t.tg_message_id}] {t.display_name or t.tg_user_id}: {text}"
         )
     for m in batch.messages:
+        text = m.text
+        voice_note = ""
+        if text.startswith("[voice]"):
+            text = text.removeprefix("[voice]").strip()
+            voice_note = " (голосовым)"
         parts.append(
-            f"[id={m.tg_message_id}] {m.display_name or m.tg_user_id}: {m.text}"
+            f"[id={m.tg_message_id}] {m.display_name or m.tg_user_id}{voice_note}: {text}"
         )
     return "\n".join(parts) if parts else "(empty batch)"
 
@@ -286,6 +296,10 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
     """Pull last N messages from message_log (including bot replies) so the
     analyzer has conversation context. Messages that are already part of
     the current batch are excluded to avoid double-quoting.
+
+    Voice transcripts (intent_detected='voice_transcript') are formatted
+    with an explicit 'voice from user' marker — Claude otherwise saw
+    `[voice] ...` and thought it was a stub without content.
     """
     async with session_scope() as session:
         res = await session.execute(
@@ -303,7 +317,15 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
         if not r.text:
             continue
         who = "бот" if r.is_bot else (str(r.tg_user_id) if r.tg_user_id else "?")
-        lines.append(f"  [id={r.tg_message_id}] {who}: {r.text[:500]}")
+        text = r.text[:500]
+        if r.intent_detected == "voice_transcript" and text.startswith("[voice]"):
+            # Strip the [voice] prefix and make the origin explicit.
+            stripped = text.removeprefix("[voice]").strip()
+            lines.append(
+                f"  [id={r.tg_message_id}] {who} (голосовым): {stripped}"
+            )
+        else:
+            lines.append(f"  [id={r.tg_message_id}] {who}: {text}")
     if not lines:
         return ""
     return "# Контекст чата (последние сообщения)\n" + "\n".join(lines)

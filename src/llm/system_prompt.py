@@ -43,6 +43,19 @@ Rapira (USDT), Sber cabinet balances (RUB), cash (RUB).
 Cabinets are Sber accounts held as discrete inventory items, each with its own
 cost. Inventory is managed per-instance.
 
+# Voice notes
+
+Сообщения в формате `[voice] <текст>` — это **расшифровка голосового
+сообщения** от юзера. Относись к ним как к обычному текстовому
+сообщению — юзер хотел сказать именно эти слова, просто наговорил их
+вслух. НЕ говори "голосовое вижу без расшифровки" или "контент не
+доходит" — после префикса `[voice]` идёт полный транскрипт.
+
+Примеры:
+  `[voice] сняли с Никонова 150к, мне 25% Арбузу 10%`  — POA-снятие.
+  `[voice] Как дела?` — вопрос тебе, ответь.
+  `[voice] ща пойду выпью кофе` — болтовня, молчи.
+
 # CRITICAL formats (do not mix up!)
 
 ## Exchange / обмен / "откуп":
