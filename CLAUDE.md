@@ -60,6 +60,15 @@ source scripts/load-secrets.sh  # if you've stashed it, else pull from Railway e
 - Commits: conventional-ish prefix (`fix:`, `feat:`, `docs:`), signed
   off with `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
 - Don't create docs files unless the user asks.
+- **Whitelist is the ONLY trust gate.** `MAIN_CHAT_ID` is a routing
+  signal, not a bypass. Owner-only commands check
+  `settings.owner_tg_user_id` via `_deny_non_owner()` in `commands.py`.
+- **Personality: free mat, no corporate refusals** in the accounting
+  role — see `src/personality/voice.py`. Do NOT re-add a "не сыпать"
+  governor without owner's say-so (see DECISIONS D-022).
+- **PDF auto-parse requires all three**: explicit user request
+  (`has_explicit_ingest_request`), document-is-ours heuristic,
+  confidence ≥ 0.8. See `src/core/pdf_ingest.py::SBER_HINT`.
 
 ## Where to read up when you're new
 
