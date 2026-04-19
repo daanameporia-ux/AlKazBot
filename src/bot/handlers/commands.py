@@ -625,6 +625,83 @@ async def cmd_undo(message: Message, command: CommandObject) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@router.message(Command("keywords"))
+async def cmd_keywords(message: Message, command: CommandObject) -> None:
+    """Manage the local trigger-keyword list.
+
+    /keywords              — show active list
+    /keywords add <слово>  — add a new keyword (>=3 chars)
+    /keywords remove <id>  — deactivate keyword by id
+    """
+    from src.core.keyword_match import invalidate as invalidate_kw_cache
+    from src.db.repositories import keywords as keyword_repo
+
+    args = (command.args or "").strip()
+    if not args:
+        async with session_scope() as session:
+            rows = await keyword_repo.list_active(session)
+        if not rows:
+            await message.answer(
+                "Ключевых слов нет. Добавь: <code>/keywords add бухгалтер</code>"
+            )
+            return
+        lines = ["<b>Триггерные слова</b> (регистронезависимо, substring):"]
+        for r in rows:
+            note = f"  <i>— {r.notes}</i>" if r.notes else ""
+            lines.append(f"  <code>#{r.id}</code> <b>{r.keyword}</b>{note}")
+        await message.answer("\n".join(lines))
+        return
+
+    subcmd, _, rest = args.partition(" ")
+    subcmd = subcmd.lower()
+
+    if subcmd == "add":
+        kw = rest.strip()
+        if not kw:
+            await message.reply("Формат: <code>/keywords add &lt;слово&gt;</code>")
+            return
+        try:
+            async with session_scope() as session:
+                me = (
+                    await user_repo.get_user_by_tg_id(session, message.from_user.id)
+                    if message.from_user
+                    else None
+                )
+                row = await keyword_repo.add(
+                    session,
+                    keyword=kw,
+                    created_by_user_id=me.id if me else None,
+                )
+        except ValueError as e:
+            await message.reply(str(e))
+            return
+        await invalidate_kw_cache()
+        await message.reply(
+            f"Записал <code>#{row.id}</code>: <b>{row.keyword}</b>"
+        )
+        return
+
+    if subcmd == "remove" or subcmd == "forget":
+        try:
+            kw_id = int(rest.strip())
+        except (TypeError, ValueError):
+            await message.reply("Формат: <code>/keywords remove &lt;id&gt;</code>")
+            return
+        async with session_scope() as session:
+            ok = await keyword_repo.deactivate(session, kw_id)
+        await invalidate_kw_cache()
+        await message.reply(
+            f"Убрал <code>#{kw_id}</code>." if ok else f"Нет активного <code>#{kw_id}</code>."
+        )
+        return
+
+    await message.reply(
+        "Не понял. Варианты: <code>/keywords</code>, "
+        "<code>/keywords add &lt;слово&gt;</code>, "
+        "<code>/keywords remove &lt;id&gt;</code>"
+    )
+
+
 @router.message(Command("resync"))
 async def cmd_resync(message: Message) -> None:
     """Manual resync — reprocess messages from the last 2h through the

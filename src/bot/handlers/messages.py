@@ -1,8 +1,14 @@
-"""Catch-all for non-command, non-mention messages.
+"""Catch-all for non-command, non-mention text messages.
 
-Previously a no-op. Now it's the passive intake for the batch buffer —
-messages from whitelisted users in the main group accumulate and are
-analyzed in bulk. Non-main chats and non-text messages are ignored.
+Policy: no more automatic "3-minute silence" or "8-message pile-up"
+flush. The bot only answers when:
+  * user @-mentions / replies (see `mentions.py`)
+  * user sends a slash-command (see `commands.py`)
+  * **OR** the text contains one of the configured trigger keywords
+    (`trigger_keywords` table, managed via `/keywords`).
+
+Everything else is logged via `MessageLoggingMiddleware` but never
+touches the LLM.
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ from aiogram.types import Message
 
 from src.bot.batcher import BufferedMessage, get_batch_buffer, is_main_group, now_ts
 from src.config import settings
+from src.core.keyword_match import find_hits
 from src.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -30,22 +37,29 @@ async def on_message(message: Message) -> None:
         return
     if not _is_whitelisted(message.from_user.id):
         return
-    # Only accumulate from the configured main group. Private chats and
-    # other groups go through the regular /commands + @-mention path.
     if not is_main_group(message.chat.id):
         return
     text = message.text or message.caption or ""
     if not text:
         return
 
-    buf = get_batch_buffer()
-    await buf.add(
-        message.chat.id,
-        BufferedMessage(
-            tg_message_id=message.message_id,
-            tg_user_id=message.from_user.id,
-            display_name=message.from_user.full_name,
-            text=text,
-            received_at=now_ts(),
-        ),
+    hits = await find_hits(text)
+    if not hits:
+        # Message logged by middleware already; no LLM call.
+        return
+
+    log.info(
+        "keyword_trigger",
+        user_id=message.from_user.id,
+        hits=hits,
+        text_preview=text[:100],
     )
+    trigger = BufferedMessage(
+        tg_message_id=message.message_id,
+        tg_user_id=message.from_user.id,
+        display_name=message.from_user.full_name,
+        text=text,
+        received_at=now_ts(),
+    )
+    buf = get_batch_buffer()
+    await buf.flush_now(message.chat.id, trigger=trigger, trigger_kind="keyword")

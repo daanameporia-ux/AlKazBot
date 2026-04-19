@@ -1,12 +1,22 @@
 """Voice-note intake.
 
-Stores the OGG bytes in Postgres, then fires a background task that
-transcribes the voice and immediately runs the batch analyzer with the
-voice as a trigger — so every voice gets an answer just like text does.
+Stores the OGG bytes, then kicks off a background task that transcribes
+locally via whisper. After transcription:
+  * the text goes into `message_log` as context,
+  * a local keyword matcher scans it — if any trigger keyword is hit,
+    fires the batch analyzer with the voice as a trigger (LLM decides
+    if it's actually addressed to the bot or a false positive);
+  * otherwise the bot stays silent and the transcript just sits in
+    recent history.
+
+Transcription is whisper locally — zero Anthropic API tokens spent on
+it. The LLM only runs when keywords hit, same budget discipline as for
+text messages.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 
 from aiogram import F, Router
@@ -70,8 +80,17 @@ async def on_voice(message: Message) -> None:
         user=message.from_user.id,
     )
 
-    # NO automatic transcription. Voice notes are just stored; whisper
-    # only runs when a user explicitly addresses the bot about this
-    # voice (via @-mention or reply within 5 s — mention handler does
-    # the transcribe on demand). Everything else stays as OGG bytes
-    # until the dev manually runs `scripts/transcribe_voices.py`.
+    # Kick off background transcription + keyword check. Whisper runs
+    # locally, no Anthropic tokens. LLM only fires if a trigger keyword
+    # shows up in the transcript.
+    from src.core.voice_trigger import transcribe_and_keyword_check
+
+    task = asyncio.create_task(
+        transcribe_and_keyword_check(message.bot, voice_id),
+        name=f"voice-kw-{voice_id}",
+    )
+    _pending_voice_tasks.add(task)
+    task.add_done_callback(_pending_voice_tasks.discard)
+
+
+_pending_voice_tasks: set[asyncio.Task] = set()

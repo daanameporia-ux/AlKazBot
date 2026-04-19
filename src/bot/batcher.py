@@ -73,7 +73,15 @@ class BatchBuffer:
         return lk
 
     async def add(self, chat_id: int, msg: BufferedMessage) -> None:
-        """Append a passive (non-trigger) message to the chat's buffer."""
+        """Append a passive (non-trigger) message to the chat's buffer.
+
+        NOTE: As of the keyword-gating refactor, `messages.on_message` no
+        longer calls `add()` — all passive context lives in `message_log`
+        instead (via middleware) and is pulled into the analyzer through
+        `_recent_history` on actual trigger. The automatic size/age
+        flushes here are kept only for potential future use; nothing
+        invokes them at the moment.
+        """
         async with self._lock(chat_id):
             buf = self._buffers.setdefault(chat_id, [])
             buf.append(msg)

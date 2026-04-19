@@ -447,6 +447,29 @@ class PendingOperation(Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class TriggerKeyword(Base):
+    """Local keyword matcher — when any of these substrings is found in a
+    freshly-arrived text (or a voice transcript), we fire the batch
+    analyzer with that message as a trigger. Zero LLM cost for the
+    matching itself; the LLM only runs on keyword hits.
+
+    Matching is case-insensitive substring (NOT whole-word) so that
+    "бот" catches "ботяра", "Арбузбот", etc. Length >= 3 enforced at
+    the repo level to avoid accidentally matching every RU message.
+    """
+
+    __tablename__ = "trigger_keywords"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    keyword: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class VoiceMessage(Base):
     """Voice notes captured from the chat — stored as raw OGG bytes until
     someone (in a Claude Code session) runs the transcription script that
