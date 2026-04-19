@@ -71,16 +71,16 @@ async def on_voice(message: Message) -> None:
         user=message.from_user.id,
     )
 
-    # Fire-and-forget: transcribe now (not in 5 min) and trigger the batch
-    # analyzer with the voice as a trigger message. Every voice gets an
-    # answer same as text.
-    from src.core.voice_trigger import transcribe_and_trigger
+    # Transcribe in the background — NO LLM trigger. Voice alone is
+    # silent; the bot only replies when the user @-mentions / replies
+    # to the bot afterwards (mention handler transcribes on demand if
+    # we haven't finished yet, and fires its own flush).
+    from src.core.voice_trigger import transcribe_only
 
     task = asyncio.create_task(
-        transcribe_and_trigger(message.bot, voice_id),
-        name=f"voice-trigger-{voice_id}",
+        transcribe_only(voice_id),
+        name=f"voice-transcribe-{voice_id}",
     )
-    # Keep a ref so GC doesn't eat the task.
     _pending_voice_tasks.add(task)
     task.add_done_callback(_pending_voice_tasks.discard)
 

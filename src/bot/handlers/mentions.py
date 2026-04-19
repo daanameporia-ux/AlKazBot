@@ -22,7 +22,6 @@ from src.core.voice_transcribe import (
     find_voice_by_message_id,
     transcribe_voice_row,
 )
-from src.core.voice_trigger import claim_voice_flush
 from src.db.session import session_scope
 from src.logging_setup import get_logger
 
@@ -59,7 +58,6 @@ async def _transcribe_linked_voice(message: Message) -> None:
         if voice_obj is not None and origin_msg_id:
             target_voice_msg_id = origin_msg_id
 
-    voice_id: int | None = None
     async with session_scope() as session:
         voice_row = None
         if target_voice_msg_id is not None:
@@ -82,28 +80,12 @@ async def _transcribe_linked_voice(message: Message) -> None:
                     chat_id=message.chat.id,
                     tg_user_id=message.from_user.id,
                 )
-        if voice_row is None:
+        if voice_row is None or voice_row.transcribed_text is not None:
             return
-        voice_id = voice_row.id
-        if voice_row.transcribed_text is None:
-            try:
-                await transcribe_voice_row(session, voice_row.id)
-            except Exception:
-                log.exception("inline_voice_transcribe_failed", voice_id=voice_row.id)
-                return
-    # Claim the voice so the handler's background task skips its own flush.
-    # We do this AFTER the session closes, so the voice_handler's pending
-    # transcribe_and_trigger sees the final committed state.
-    if voice_id is not None:
         try:
-            claimed = await claim_voice_flush(voice_id)
-            log.info(
-                "mention_voice_claim",
-                voice_id=voice_id,
-                claimed_by_mention=claimed,
-            )
+            await transcribe_voice_row(session, voice_row.id)
         except Exception:
-            log.exception("mention_voice_claim_failed", voice_id=voice_id)
+            log.exception("inline_voice_transcribe_failed", voice_id=voice_row.id)
 
 
 async def _addressed_to_me(message: Message) -> bool:
