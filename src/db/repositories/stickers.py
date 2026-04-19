@@ -187,14 +187,15 @@ async def described_catalog(
     *,
     per_pack: int = 20,
     pack_limit: int = 10,
-) -> list[tuple[str, list[tuple[str, str, str]]]]:
+) -> list[tuple[str, str | None, list[tuple[str, str, str]]]]:
     """Per-pack catalog with Vision descriptions.
 
-    Returns `[(pack_name, [(emoji, description, file_unique_id), ...]), ...]`
-    where each inner tuple is a described sticker. Only stickers with
-    `description IS NOT NULL` are included. Packs sorted by described-
-    count descending; inner list ordered by `usage_count DESC`
-    (stickers the team actually loves first) then by id.
+    Returns `[(pack_name, pack_theme, [(emoji, description, file_unique_id), ...]), ...]`
+    where each inner tuple is a described sticker. `pack_theme` is the
+    same theme for all entries in a pack (NULL if unthemed). Only
+    stickers with `description IS NOT NULL` are included. Packs sorted
+    by described-count descending; inner list ordered by `usage_count
+    DESC` (stickers the team actually loves first) then by id.
 
     Cap `per_pack` so the system-prompt block stays in cache-friendly
     territory. `pack_limit` bounds the total pack count.
@@ -202,6 +203,7 @@ async def described_catalog(
     res = await session.execute(
         select(
             SeenSticker.sticker_set,
+            SeenSticker.pack_theme,
             SeenSticker.emoji,
             SeenSticker.description,
             SeenSticker.file_unique_id,
@@ -214,14 +216,18 @@ async def described_catalog(
         .order_by(SeenSticker.usage_count.desc(), SeenSticker.id.asc())
     )
     by_pack: dict[str, list[tuple[str, str, str]]] = {}
-    for pack, emoji, desc, fuid, _uc in res.all():
+    theme_of: dict[str, str | None] = {}
+    for pack, theme, emoji, desc, fuid, _uc in res.all():
         if not pack:
             continue
         lst = by_pack.setdefault(pack, [])
+        theme_of.setdefault(pack, theme)
+        if theme and theme_of[pack] is None:
+            theme_of[pack] = theme
         if len(lst) < per_pack:
             lst.append((emoji or "", desc or "", fuid or ""))
     ranked = sorted(by_pack.items(), key=lambda kv: -len(kv[1]))
-    return ranked[:pack_limit]
+    return [(p, theme_of.get(p), items) for p, items in ranked[:pack_limit]]
 
 
 async def pick_smart(
@@ -230,16 +236,22 @@ async def pick_smart(
     emoji: str | None = None,
     description_hint: str | None = None,
     pack_hint: str | None = None,
+    theme_hint: str | None = None,
     limit: int = 25,
 ) -> SeenSticker | None:
     """Smarter resolver that Claude can steer via emoji + description
-    hint + pack hint. Any None filter is skipped. Final pick is random
-    among the narrowed candidates, biased toward lower usage_count
-    (freshness).
+    hint + pack hint + theme hint. Any None filter is skipped. Final
+    pick is random among the narrowed candidates, biased toward lower
+    usage_count (freshness).
+
+    `theme_hint` matches `pack_theme` exactly (case-insensitive) — e.g.
+    "сбер-мем" returns stickers from packs tagged as Sber memes.
+    Useful when the user asks "что-то про Сбер" and you want the whole
+    themed pack, not just a single emoji match.
     """
     import random
 
-    from sqlalchemy import or_
+    from sqlalchemy import func, or_
 
     clauses = []
     if emoji:
@@ -255,6 +267,10 @@ async def pick_smart(
         clauses.append(SeenSticker.description.ilike(f"%{description_hint}%"))
     if pack_hint:
         clauses.append(SeenSticker.sticker_set.ilike(f"%{pack_hint}%"))
+    if theme_hint:
+        clauses.append(
+            func.lower(SeenSticker.pack_theme) == theme_hint.lower()
+        )
 
     q = select(SeenSticker).order_by(SeenSticker.usage_count.asc()).limit(limit)
     for c in clauses:

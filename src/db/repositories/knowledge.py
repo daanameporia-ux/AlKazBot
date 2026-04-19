@@ -4,9 +4,16 @@ Spec §"Обучаемость" dictates:
 - categories: entity | rule | pattern | preference | glossary | alias
 - confidence: confirmed | inferred | tentative
 - confidence auto-upgrades to `confirmed` if the same fact is added again.
+
+Dedup strategy:
+- Exact match (case-insensitive content + same category/key) — merge.
+- Fuzzy match (similarity ≥ FUZZY_DEDUP_THRESHOLD on content within
+  category + same key) — merge. Catches "Рапира биржа" vs "Рапира — биржа".
 """
 
 from __future__ import annotations
+
+from difflib import SequenceMatcher
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +22,15 @@ from src.db.models import KnowledgeBase
 
 CONFIDENCE_ORDER = {"tentative": 0, "inferred": 1, "confirmed": 2}
 VALID_CATEGORIES = ("entity", "rule", "pattern", "preference", "glossary", "alias")
+
+# Two facts are "the same fact" if their lowercased content is ≥85% similar
+# by Ratcliff-Obershelp. High enough that "короткая форма" vs "короткая
+# форма." merge, low enough that genuinely different facts don't collide.
+FUZZY_DEDUP_THRESHOLD = 0.85
+
+
+def _similar(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
 
 async def add_fact(
@@ -27,11 +43,16 @@ async def add_fact(
     created_by_user_id: int | None = None,
     notes: str | None = None,
 ) -> KnowledgeBase:
-    """Insert a new fact. If an identical fact (same category + key + content)
-    already exists and is `is_active`, upgrade its confidence instead of
-    creating a duplicate.
+    """Insert a new fact with two-stage dedup.
+
+    Stage 1 — exact content match (case-insensitive) within category/key:
+              bump confidence + usage_count and return.
+    Stage 2 — fuzzy content match (ratio ≥ FUZZY_DEDUP_THRESHOLD) within
+              category + same key: merge, preserving the longer content
+              and higher confidence.
+    Stage 3 — insert as new row.
     """
-    # Dedup heuristic — case-insensitive content match within (category, key?).
+    # Stage 1: exact match
     stmt = select(KnowledgeBase).where(
         KnowledgeBase.category == category,
         KnowledgeBase.is_active.is_(True),
@@ -40,13 +61,33 @@ async def add_fact(
     if key:
         stmt = stmt.where(KnowledgeBase.key == key)
     existing = (await session.execute(stmt)).scalar_one_or_none()
-
     if existing is not None:
         if CONFIDENCE_ORDER[confidence] > CONFIDENCE_ORDER[existing.confidence]:
             existing.confidence = confidence
         existing.usage_count = existing.usage_count + 1
         return existing
 
+    # Stage 2: fuzzy match within same category + same (or both NULL) key
+    fuzzy_stmt = select(KnowledgeBase).where(
+        KnowledgeBase.category == category,
+        KnowledgeBase.is_active.is_(True),
+    )
+    if key:
+        fuzzy_stmt = fuzzy_stmt.where(KnowledgeBase.key == key)
+    else:
+        fuzzy_stmt = fuzzy_stmt.where(KnowledgeBase.key.is_(None))
+    candidates = list((await session.execute(fuzzy_stmt)).scalars().all())
+    for cand in candidates:
+        if _similar(cand.content, content) >= FUZZY_DEDUP_THRESHOLD:
+            # Keep the longer / more-detailed content.
+            if len(content) > len(cand.content):
+                cand.content = content
+            if CONFIDENCE_ORDER[confidence] > CONFIDENCE_ORDER[cand.confidence]:
+                cand.confidence = confidence
+            cand.usage_count = cand.usage_count + 1
+            return cand
+
+    # Stage 3: new row
     fact = KnowledgeBase(
         category=category,
         key=key,

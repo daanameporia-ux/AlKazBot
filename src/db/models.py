@@ -524,6 +524,10 @@ class SeenSticker(Base):
     description: Mapped[str | None] = mapped_column(Text)
     description_model: Mapped[str | None] = mapped_column(Text)
     described_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Thematic tag applied to the whole pack (e.g. "сбер-мем", "ругань",
+    # "устал"). Populated manually or by a backfill worker; lets the bot
+    # pick stickers by theme when description_hint alone is ambiguous.
+    pack_theme: Mapped[str | None] = mapped_column(Text, index=True)
 
 
 class StickerUsage(Base):

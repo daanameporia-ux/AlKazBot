@@ -20,6 +20,7 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
+from src.config import settings
 from src.db.repositories import balances as balances_repo
 from src.db.repositories import cabinets as cabinet_repo
 from src.db.repositories import clients as client_repo
@@ -34,6 +35,29 @@ from src.personality.voice import GREETING_FIRST_RUN
 
 log = get_logger(__name__)
 router = Router(name="commands")
+
+
+def _is_owner(message: Message) -> bool:
+    return (
+        message.from_user is not None
+        and settings.owner_tg_user_id > 0
+        and message.from_user.id == settings.owner_tg_user_id
+    )
+
+
+async def _deny_non_owner(message: Message, action: str) -> bool:
+    """Reply with a short refusal and return True if the caller isn't owner.
+
+    Use at the top of owner-gated commands:
+        if await _deny_non_owner(message, "менять keywords"):
+            return
+    """
+    if _is_owner(message):
+        return False
+    await message.reply(
+        f"Эту штуку ({action}) разруливает только owner. Попроси Казаха."
+    )
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -656,6 +680,8 @@ async def cmd_keywords(message: Message, command: CommandObject) -> None:
     subcmd = subcmd.lower()
 
     if subcmd == "add":
+        if await _deny_non_owner(message, "добавлять trigger-слова"):
+            return
         kw = rest.strip()
         if not kw:
             await message.reply("Формат: <code>/keywords add &lt;слово&gt;</code>")
@@ -682,6 +708,8 @@ async def cmd_keywords(message: Message, command: CommandObject) -> None:
         return
 
     if subcmd == "remove" or subcmd == "forget":
+        if await _deny_non_owner(message, "удалять trigger-слова"):
+            return
         try:
             kw_id = int(rest.strip())
         except (TypeError, ValueError):
@@ -706,7 +734,10 @@ async def cmd_keywords(message: Message, command: CommandObject) -> None:
 async def cmd_resync(message: Message) -> None:
     """Manual resync — reprocess messages from the last 2h through the
     batch analyzer. Useful if the bot was rebooted and missed a chunk.
+    Owner only — resync re-fires LLM on past messages, which burns tokens.
     """
+    if await _deny_non_owner(message, "запускать ресинк"):
+        return
     from src.core.resync import resync
 
     await message.reply("Запустил ресинк, подожди 5-15 сек…")
@@ -736,6 +767,8 @@ async def cmd_voices(message: Message) -> None:
 
 @router.message(Command("silent"))
 async def cmd_silent(message: Message, command: CommandObject) -> None:
+    if await _deny_non_owner(message, "включать silent-режим"):
+        return
     from src.core import silent
 
     args = (command.args or "").strip().lower()
@@ -771,7 +804,10 @@ async def cmd_avatar(message: Message) -> None:
 
     Usage: send a photo, then reply to it with `/avatar`. Bot must be an
     admin with `can_change_info` — you already granted that.
+    Owner only — changing chat avatar affects all members.
     """
+    if await _deny_non_owner(message, "менять аватарку чата"):
+        return
     import io
 
     from aiogram.types import BufferedInputFile

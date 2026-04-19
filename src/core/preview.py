@@ -18,6 +18,11 @@ def _fmt_rub(x) -> str:
         v = Decimal(str(x))
     except (InvalidOperation, TypeError):
         return str(x)
+    # KB preference: round RUB to 100₽ for values >= 10_000, 1₽ for smaller.
+    abs_v = abs(v)
+    if abs_v >= Decimal("10000"):
+        rounded = (v / Decimal("100")).to_integral_value() * Decimal("100")
+        return f"{rounded:,.0f} ₽".replace(",", " ")
     return f"{v:,.0f} ₽".replace(",", " ")
 
 
@@ -26,7 +31,8 @@ def _fmt_usdt(x) -> str:
         v = Decimal(str(x))
     except (InvalidOperation, TypeError):
         return str(x)
-    return f"{v:,.2f} USDT".replace(",", " ")
+    # KB preference: USDT round to $1 in previews/reports.
+    return f"{v:,.0f}$".replace(",", " ")
 
 
 CONFIDENCE_ACCEPT_THRESHOLD = 0.7
@@ -57,11 +63,10 @@ def render(intent: str, fields: dict[str, Any], summary: str) -> str:
     lines: list[str] = [f"<b>Записать?</b>  <i>{summary}</i>", ""]
 
     if intent_value == Intent.EXCHANGE.value:
-        lines += [
-            f"• Рубли:   {_fmt_rub(fields.get('amount_rub'))}",
-            f"• USDT:    {_fmt_usdt(fields.get('amount_usdt'))}",
-            f"• Курс:    {fields.get('fx_rate')} ₽/USDT",
-        ]
+        rub = _fmt_rub(fields.get("amount_rub"))
+        usdt = _fmt_usdt(fields.get("amount_usdt"))
+        rate = fields.get("fx_rate")
+        lines.append(f"• {rub}  @ {rate} ₽/USDT  =  {usdt}")
     elif intent_value == Intent.EXPENSE.value:
         lines += [
             f"• Категория: {fields.get('category', '?')}",

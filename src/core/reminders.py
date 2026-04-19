@@ -49,6 +49,26 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+# Quiet window in Moscow time (team lives there): 22:00 — 09:00 local.
+# UTC is MSK-3, so 19:00–06:00 UTC.
+_QUIET_START_UTC_HOUR = 19
+_QUIET_END_UTC_HOUR = 6
+
+
+def _in_quiet_window(now: datetime | None = None) -> bool:
+    """True while we should not nag the group chat (night, early morning).
+
+    Structural reminders (pending_op expiry, OGG wipe, pending-op purge)
+    run regardless — they don't send chat messages. Only the *nag* checks
+    should gate on this.
+    """
+    h = (now or _utcnow()).hour
+    if _QUIET_START_UTC_HOUR <= _QUIET_END_UTC_HOUR:
+        return _QUIET_START_UTC_HOUR <= h < _QUIET_END_UTC_HOUR
+    # Wraps midnight — e.g. 19 → 6.
+    return h >= _QUIET_START_UTC_HOUR or h < _QUIET_END_UTC_HOUR
+
+
 # --------------------------------------------------------------------------- #
 # De-dup helpers — one fired row per (type, day, context-key)
 # --------------------------------------------------------------------------- #
@@ -94,7 +114,7 @@ async def _mark_fired(
 
 
 async def _check_report_overdue(bot: Bot) -> None:
-    if not settings.main_chat_id:
+    if not settings.main_chat_id or _in_quiet_window():
         return
     # Phase 1: decide + mark fired, all inside a committed transaction.
     text: str | None = None
@@ -133,7 +153,7 @@ async def _check_report_overdue(bot: Bot) -> None:
 
 
 async def _check_acquiring_missing(bot: Bot) -> None:
-    if not settings.main_chat_id:
+    if not settings.main_chat_id or _in_quiet_window():
         return
     text: str | None = None
     async with session_scope() as session:
@@ -164,7 +184,7 @@ async def _check_acquiring_missing(bot: Bot) -> None:
 
 
 async def _check_cabinet_too_long(bot: Bot) -> None:
-    if not settings.main_chat_id:
+    if not settings.main_chat_id or _in_quiet_window():
         return
     to_send: list[str] = []
     async with session_scope() as session:
@@ -194,7 +214,7 @@ async def _check_cabinet_too_long(bot: Bot) -> None:
 
 
 async def _check_poa_without_exchange(bot: Bot) -> None:
-    if not settings.main_chat_id:
+    if not settings.main_chat_id or _in_quiet_window():
         return
     to_send: list[str] = []
     async with session_scope() as session:
@@ -226,7 +246,7 @@ async def _check_poa_without_exchange(bot: Bot) -> None:
 
 
 async def _check_client_debt_stale(bot: Bot) -> None:
-    if not settings.main_chat_id:
+    if not settings.main_chat_id or _in_quiet_window():
         return
     to_send: list[str] = []
     async with session_scope() as session:
@@ -290,26 +310,50 @@ async def _maybe_prank(bot: Bot) -> None:
 
 
 async def _wipe_stale_voice_ogg(bot: Bot) -> None:
-    """Backstop — if a voice never got transcribed within 72h, zero out
-    the OGG blob anyway so Postgres doesn't balloon from stale audio.
+    """Keep OGG bytes for 14 days so we can re-transcribe after a model
+    upgrade (small → medium) or debug a garbled transcript. After 14 days
+    wipe unconditionally — Postgres shouldn't balloon on old audio.
+
+    Voices that *never* got transcribed are wiped at the same 14-day mark
+    (earlier cutoff would orphan them before a manual `/resync`-style
+    fix-up could be attempted).
     """
     from sqlalchemy import update
 
     from src.db.models import VoiceMessage
 
-    cutoff = _utcnow() - timedelta(hours=72)
+    cutoff = _utcnow() - timedelta(days=14)
     async with session_scope() as session:
         res = await session.execute(
             update(VoiceMessage)
             .where(
                 VoiceMessage.created_at < cutoff,
-                VoiceMessage.transcribed_text.is_(None),
                 VoiceMessage.ogg_data != b"",
             )
             .values(ogg_data=b"")
         )
         if res.rowcount:
             log.info("voice_ogg_wiped_stale", count=res.rowcount)
+
+
+async def _purge_expired_pending_ops(bot: Bot) -> None:
+    """Hard-delete pending_ops rows with status='expired'/'cancelled'
+    older than 7 days — `expire_stale` only marks them, which lets the
+    table grow indefinitely."""
+    from sqlalchemy import delete
+
+    from src.db.models import PendingOperation
+
+    cutoff = _utcnow() - timedelta(days=7)
+    async with session_scope() as session:
+        res = await session.execute(
+            delete(PendingOperation).where(
+                PendingOperation.status.in_(("expired", "cancelled")),
+                PendingOperation.created_at < cutoff,
+            )
+        )
+        if res.rowcount:
+            log.info("pending_ops_purged", count=res.rowcount)
 
 
 _JOBS: list[tuple[str, Any, int]] = [
@@ -322,12 +366,21 @@ _JOBS: list[tuple[str, Any, int]] = [
     ("pending_op_expiry", _check_pending_op_expiry, 15),
     ("maybe_prank", _maybe_prank, 60),
     ("wipe_stale_voice_ogg", _wipe_stale_voice_ogg, 360),
+    ("purge_expired_pending_ops", _purge_expired_pending_ops, 720),
 ]
+
+
+def _register_advisor_jobs() -> list[tuple[str, Any, int]]:
+    """Import lazily so the advisor module isn't required to import reminders."""
+    from src.core.advisor import ADVISOR_JOBS
+
+    return list(ADVISOR_JOBS)
 
 
 def start_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
-    for name, coro, minutes in _JOBS:
+    all_jobs: list[tuple[str, Any, int]] = list(_JOBS) + _register_advisor_jobs()
+    for name, coro, minutes in all_jobs:
         scheduler.add_job(
             coro,
             IntervalTrigger(minutes=minutes),
@@ -338,5 +391,5 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
             next_run_time=_utcnow() + timedelta(minutes=2),
         )
     scheduler.start()
-    log.info("reminders_started", jobs=[n for n, _, _ in _JOBS])
+    log.info("reminders_started", jobs=[n for n, _, _ in all_jobs])
     return scheduler

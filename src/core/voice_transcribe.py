@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import MessageLog, VoiceMessage
+from src.db.session import session_scope
 from src.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -101,22 +102,56 @@ def _transcribe_sync(
         Path(path).unlink(missing_ok=True)
 
 
+# Hard deadline for a single whisper pass. A ~30-sec clip on CPU int8
+# completes in 10-25 sec; anything over this is either a stuck thread or a
+# pathological audio file, and we'd rather give up than freeze polling.
+TRANSCRIBE_TIMEOUT_SEC = 180
+
+
 async def transcribe_bytes(
     ogg: bytes,
     *,
     language: str = "ru",
     initial_prompt: str | None = None,
 ) -> str:
-    return await asyncio.to_thread(
-        _transcribe_sync, ogg, language, initial_prompt
-    )
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_transcribe_sync, ogg, language, initial_prompt),
+            timeout=TRANSCRIBE_TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        log.warning("whisper_timeout", bytes=len(ogg))
+        return ""
 
 
 # Static lead text — "sets the scene" so Whisper biases toward chat-style
 # Russian instead of defaulting to cleaner dictation. The dynamic keyword
-# list is appended per-call inside `_build_whisper_prompt`.
+# list + KB entity names is appended per-call inside `_build_whisper_prompt`.
 _WHISPER_PROMPT_LEAD = (
-    "Разговор в Telegram-чате про Сбер-кабинеты, POA, обмен RUB на USDT."
+    "Разговор в Telegram-чате команды процессинга. "
+    "Темы: Сбер-кабинеты, POA (доверенности), обмен RUB на USDT, "
+    "эквайринг, нотариалка, кабинет в работе, додеп, откуп."
+)
+
+# Core business vocabulary Whisper should recognise. These bias the model
+# toward the right tokens for short/noisy Russian speech. Cyrillic only —
+# mixing ASCII into initial_prompt encourages Whisper to romanise output.
+_CORE_VOCAB: tuple[str, ...] = (
+    # Partners
+    "казах", "арбуз",
+    # Clients / suppliers we see often
+    "никонов", "миша", "сельвян",
+    # Wallets / platforms
+    "тапбанк", "меркурио", "рапира", "сбер", "сбербанк",
+    # Business slang
+    "кабинет", "кабинеты", "нотариалка", "эквайринг", "додеп", "откуп",
+    "пятерик", "десятка", "нал", "наличка", "рапа", "контора",
+    # Entity aliases
+    "арнелле", "tpay", "merk",
+    # POA / exchange terminology
+    "доверенность", "снятие", "обмен", "комиссия", "курс",
+    # Wakewords for the bot (cyrillic only — latin variants stay in DB)
+    "алкаш", "алказ", "алказбот", "ержан", "бот", "бухгалтер", "пёс",
 )
 
 
@@ -131,38 +166,101 @@ def _is_cyrillic_word(s: str) -> bool:
     return has_cyr and not has_lat
 
 
-def _build_whisper_prompt(keywords: list[str]) -> str | None:
+async def _collect_entity_vocab() -> list[str]:
+    """Pull KB entity keys (client/supplier names) so Whisper has them in
+    the hint. Cached by the caller (knowledge_base changes rarely)."""
+    try:
+        from src.db.repositories import knowledge as kb_repo
+
+        async with session_scope() as session:
+            facts = await kb_repo.list_facts(session, min_confidence="inferred")
+    except Exception:
+        return []
+    out: list[str] = []
+    for f in facts:
+        if f.category in ("entity", "alias") and f.key:
+            out.append(f.key)
+    return out
+
+
+def _build_whisper_prompt(
+    keywords: list[str], entities: list[str] | None = None
+) -> str | None:
     """Craft a compact initial_prompt for faster-whisper that lists
-    project-specific vocabulary (bot nicknames, role words, slang).
+    project-specific vocabulary (bot nicknames, partners, clients,
+    slang). Whisper's initial_prompt is treated as prior context the
+    model has "already seen", so listing words here sharply improves
+    recall on short/noisy Russian speech.
 
-    Whisper's initial_prompt is treated as prior context the model has
-    "already seen" before transcription starts, so listing words here
-    sharply improves recall on those exact tokens. Cap at 224 tokens
-    per faster-whisper docs — our list is tiny, well under limit.
-
-    IMPORTANT: only pure-Cyrillic keywords are included in the prompt.
-    Mixing ASCII (e.g. "al_kazbot") encourages Whisper to transcribe
-    Russian speech in Latin letters ("Алкаш" → "Alkaz"), which then
-    defeats substring matching against the DB's Cyrillic canonical
-    forms. Latin variants of keywords still live in `trigger_keywords`
-    and will catch anything that slips through anyway.
+    Cyrillic-only filter — ASCII tokens in the prompt (e.g.
+    "al_kazbot") encourage Whisper to transliterate ("Алкаш" →
+    "Alkaz"), defeating substring matching against our Cyrillic
+    trigger_keywords. Latin variants stay in the DB as a safety net.
     """
-    if not keywords:
-        return None
     seen: set[str] = set()
     ordered: list[str] = []
-    for k in keywords:
-        lo = k.strip().lower()
+
+    def _add(word: str) -> None:
+        lo = word.strip().lower()
         if not lo or lo in seen:
-            continue
+            return
         if not _is_cyrillic_word(lo):
-            continue
+            return
         seen.add(lo)
         ordered.append(lo)
+
+    # Keywords from the DB get priority (user-managed set).
+    for k in keywords or []:
+        _add(k)
+    # Then KB entity names (clients, suppliers).
+    for e in entities or []:
+        _add(e)
+    # Then the static core vocab — last, so if we're near the 224-token
+    # Whisper prompt cap, DB-sourced words win.
+    for c in _CORE_VOCAB:
+        _add(c)
+
     if not ordered:
-        return None
+        return _WHISPER_PROMPT_LEAD  # still bias toward chat-style Russian
     vocab = ", ".join(ordered)
-    return f"{_WHISPER_PROMPT_LEAD} Позывные и роли: {vocab}."
+    return f"{_WHISPER_PROMPT_LEAD} Лексика: {vocab}."
+
+
+# Common Whisper Russian misfires on short/noisy speech. Map is intentionally
+# small — only the patterns we've seen more than once in prod logs, with
+# enough context that we don't misfire on innocent text. Applied after
+# transcription, before passing to keyword_match / analyzer.
+_POST_FIXES: tuple[tuple[str, str], ...] = (
+    # "Вержан" / "верджан" (no initial "e") → Ержан (bot wake-word).
+    (r"\bвержан\b", "ержан"),
+    (r"\bверджан\b", "ержан"),
+    # "Alkaz" / "Alkash" in a Cyrillic stream — drop back to Cyrillic.
+    (r"\balkaz\b", "алказ"),
+    (r"\balkash\b", "алкаш"),
+    (r"\berzhan\b", "ержан"),
+    # "нахуят" — almost always "нахуя ты"
+    (r"\bнахуят\b", "нахуя ты"),
+    # "Als" / "Алз" truncations of "Алкаш"
+    (r"\bалз\b", "алкаш"),
+)
+
+
+def _postprocess_transcript(text: str) -> str:
+    """Apply small regex fixes for common Whisper Russian mishears.
+
+    Idempotent — running twice yields the same result. Applied case-
+    insensitively to the lowercased copy, but preserves casing best-effort
+    by only touching the lowercase comparison (keyword_match is case-
+    insensitive anyway, so we lowercase the output here).
+    """
+    import re
+
+    if not text:
+        return text
+    out = text
+    for pat, rep in _POST_FIXES:
+        out = re.sub(pat, rep, out, flags=re.IGNORECASE)
+    return out
 
 
 async def transcribe_voice_row(
@@ -189,8 +287,9 @@ async def transcribe_voice_row(
             if not row.ogg_data:
                 return None
 
-            # Pull active keywords and bake them into a Whisper prompt so
-            # the model doesn't mis-hear "бот" as "бод" / "вот". Failure
+            # Pull active keywords + KB entity names and bake them into a
+            # Whisper prompt so the model recognises our jargon (bot
+            # nicknames, partner/client names, business slang). Failure
             # to build the prompt (e.g. DB transient error) falls back to
             # unbiased transcription — not a blocker.
             prompt: str | None = None
@@ -198,19 +297,25 @@ async def transcribe_voice_row(
                 from src.core.keyword_match import get_active_keywords
 
                 kws = await get_active_keywords()
-                prompt = _build_whisper_prompt(kws)
+                entities = await _collect_entity_vocab()
+                prompt = _build_whisper_prompt(kws, entities)
             except Exception:
                 log.exception("whisper_prompt_build_failed")
 
-            text = await transcribe_bytes(
+            raw_text = await transcribe_bytes(
                 bytes(row.ogg_data), initial_prompt=prompt
             )
+            text = _postprocess_transcript(raw_text)
             if not text:
                 text = "(тишина)"
 
             row.transcribed_text = text
             row.transcribed_at = datetime.now(UTC)
-            row.ogg_data = b""
+            # Keep OGG bytes for retranscription after model upgrades — the
+            # periodic wipe worker (see reminders.py) clears them after 14
+            # days so Postgres doesn't balloon. Immediate-zero was causing
+            # lost re-listen capability.
+            # row.ogg_data stays as-is intentionally.
 
             # Mirror into message_log so the analyzer / history sees it.
             session.add(

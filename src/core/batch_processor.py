@@ -36,17 +36,24 @@ async def _maybe_send_sticker(
     emoji: str | None,
     description_hint: str | None = None,
     pack_hint: str | None = None,
+    theme_hint: str | None = None,
 ) -> None:
-    """If Claude set any of sticker_emoji / _description_hint / _pack_hint,
-    resolve to a real sticker from `seen_stickers` and send it. Silent
-    no-op when all three are empty or no match — `chat_reply` (if any)
-    still went through separately.
+    """If Claude set any of sticker_emoji / _description_hint / _pack_hint /
+    _theme_hint, resolve to a real sticker from `seen_stickers` and send
+    it. Silent no-op when all are empty or no match — `chat_reply` (if
+    any) still went through separately.
 
-    Resolution order: `pick_smart` applies all provided filters as an
-    intersection and picks among the low-`usage_count` half of results
-    (so the bot doesn't mash the same sticker repeatedly).
+    Resolution cascade (each next step relaxes one filter):
+      1. all filters (intersection);
+      2. drop `description_hint` + `pack_hint`, keep emoji + theme;
+      3. description_hint alone;
+      4. theme alone;
+      5. give up silently.
+    This stops the "asked for Sber, got Blizzard" class of miss: theme
+    pins the pack, description narrows within it, emoji can be a tie-
+    breaker but doesn't drive the choice.
     """
-    if not emoji and not description_hint and not pack_hint:
+    if not emoji and not description_hint and not pack_hint and not theme_hint:
         return
     async with session_scope() as session:
         chosen = await sticker_repo.pick_smart(
@@ -54,22 +61,26 @@ async def _maybe_send_sticker(
             emoji=emoji,
             description_hint=description_hint,
             pack_hint=pack_hint,
+            theme_hint=theme_hint,
         )
-        # Fallback: if we had both emoji AND hints and got nothing,
-        # loosen to just emoji (or just description).
+        # Fallback 1: keep emoji + theme, drop description/pack text.
         if chosen is None and (description_hint or pack_hint):
             chosen = await sticker_repo.pick_smart(
                 session,
                 emoji=emoji,
-                description_hint=None,
-                pack_hint=None,
+                theme_hint=theme_hint,
             )
+        # Fallback 2: description alone (when emoji was the red herring).
         if chosen is None and description_hint:
             chosen = await sticker_repo.pick_smart(
                 session,
-                emoji=None,
                 description_hint=description_hint,
-                pack_hint=None,
+            )
+        # Fallback 3: theme alone.
+        if chosen is None and theme_hint:
+            chosen = await sticker_repo.pick_smart(
+                session,
+                theme_hint=theme_hint,
             )
         if chosen is None:
             log.info(
@@ -77,6 +88,7 @@ async def _maybe_send_sticker(
                 emoji=emoji,
                 description_hint=description_hint,
                 pack_hint=pack_hint,
+                theme_hint=theme_hint,
             )
             return
         try:
@@ -131,6 +143,14 @@ confirm_keyboard = _confirm_kb
 
 
 async def _load_kb_items() -> list[dict]:
+    """Load all active KB facts above `inferred` confidence.
+
+    We used to always dump everything. As the KB grows past ~200 facts the
+    prompt balloons; when that becomes painful, wire in intent-aware
+    filtering by passing the trigger text into this function and
+    pre-selecting categories. For now, 30-60 facts still comfortably fits
+    inside the cached system block.
+    """
     async with session_scope() as session:
         facts = await kb_repo.list_facts(session, min_confidence="inferred")
     return [
@@ -201,6 +221,7 @@ def make_flush_handler(bot: Bot):
                     emoji=analysis.sticker_emoji,
                     description_hint=analysis.sticker_description_hint,
                     pack_hint=analysis.sticker_pack_hint,
+                    theme_hint=analysis.sticker_theme_hint,
                 )
             except Exception:
                 log.exception("sticker_emoji_handling_failed")

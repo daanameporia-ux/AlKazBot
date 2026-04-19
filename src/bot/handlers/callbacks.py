@@ -37,12 +37,38 @@ log = get_logger(__name__)
 router = Router(name="callbacks")
 
 
+def _can_act_on(op, tg_user_id: int) -> bool:
+    """Only the operation's creator or the owner can confirm/cancel.
+
+    Why: callback_data travels openly in UI. Without this, anyone who sees
+    a card (or guesses a uid) could fire someone else's pending op. The
+    owner can always step in — useful when Казах reviews Арбуз's ops.
+    """
+    from src.config import settings
+
+    return (
+        tg_user_id == op.created_by_tg_id
+        or tg_user_id == settings.owner_tg_user_id
+    )
+
+
 @router.callback_query(F.data.startswith("confirm:"))
 async def on_confirm(q: CallbackQuery) -> None:
     if q.data is None or q.from_user is None:
         await q.answer()
         return
     uid = q.data.split(":", 1)[1]
+    # Peek first so we can reject impostors without flipping status.
+    existing = await pending_ops.peek(uid)
+    if existing is None:
+        await q.answer("Эта операция уже обработана или истекла.", show_alert=True)
+        return
+    if not _can_act_on(existing, q.from_user.id):
+        await q.answer(
+            "Не твоя операция — пусть подтвердит тот, кто создал, или owner.",
+            show_alert=True,
+        )
+        return
     op = await pending_ops.pop_for_confirm(uid)
     if op is None:
         await q.answer("Эта операция уже обработана или истекла.", show_alert=True)
@@ -84,10 +110,17 @@ async def on_confirm(q: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("cancel:"))
 async def on_cancel(q: CallbackQuery) -> None:
-    if q.data is None:
+    if q.data is None or q.from_user is None:
         await q.answer()
         return
     uid = q.data.split(":", 1)[1]
+    existing = await pending_ops.peek(uid)
+    if existing is not None and not _can_act_on(existing, q.from_user.id):
+        await q.answer(
+            "Не твоя операция — пусть отменит тот, кто создал, или owner.",
+            show_alert=True,
+        )
+        return
     op = await pending_ops.pop_for_cancel(uid)
     if q.message:
         new_text = (

@@ -51,12 +51,21 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="help", description="Что я умею"),
     BotCommand(command="report", description="Собрать вечерний отчёт"),
     BotCommand(command="balance", description="Быстрый снапшот балансов"),
-    BotCommand(command="stock", description="Что на складе"),
+    BotCommand(command="stock", description="Кабинеты на складе"),
     BotCommand(command="fx", description="Текущий курс RUB→USDT"),
     BotCommand(command="partners", description="Доли партнёров"),
-    BotCommand(command="knowledge", description="База знаний бота"),
-    BotCommand(command="feedback", description="Пожелания команды"),
+    BotCommand(command="clients", description="Список клиентов"),
+    BotCommand(command="client", description="История по клиенту"),
+    BotCommand(command="debts", description="Открытые долги"),
     BotCommand(command="history", description="Последние операции"),
+    BotCommand(command="undo", description="Откатить операцию"),
+    BotCommand(command="knowledge", description="База знаний"),
+    BotCommand(command="keywords", description="Trigger-слова"),
+    BotCommand(command="feedback", description="Пожелания команды"),
+    BotCommand(command="voices", description="Нетранскрибированные голосовые"),
+    BotCommand(command="silent", description="Замолкнуть / включиться"),
+    BotCommand(command="resync", description="Переобработать пропущенное"),
+    BotCommand(command="avatar", description="Сменить аватарку (reply фото)"),
     BotCommand(command="chatid", description="Показать chat_id"),
 ]
 
@@ -157,14 +166,16 @@ async def _runner() -> None:
     polling_task.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await polling_task
-    # Drain any in-flight batch-flush tasks (up to 15 s) so users don't lose
-    # preview cards to SIGTERM.
+    # Drain any in-flight batch-flush tasks (up to 45 s) so users don't lose
+    # preview cards to SIGTERM. Claude's retry backoff can take ~30 s on the
+    # unlucky path, so a 15 s drain was too tight and occasionally lost
+    # cards mid-send.
     try:
         buf = get_batch_buffer()
         inflight = list(buf._inflight)
         if inflight:
             log.info("draining_inflight_tasks", count=len(inflight))
-            _done, pending = await asyncio.wait(inflight, timeout=15)
+            _done, pending = await asyncio.wait(inflight, timeout=45)
             if pending:
                 log.warning("drain_timeout", still_pending=len(pending))
     except Exception:

@@ -22,11 +22,25 @@ from aiogram.types import Message
 
 from src.bot.batcher import BufferedMessage, get_batch_buffer, is_main_group, now_ts
 from src.config import settings
-from src.core.pdf_ingest import SBER_HINT, extract_pdf_text, is_sber_statement
+from src.core.pdf_ingest import (
+    ALIEN_PDF_HINT,
+    SBER_HINT,
+    extract_pdf_text,
+    is_sber_statement,
+)
 from src.logging_setup import get_logger
 
 log = get_logger(__name__)
 router = Router(name="documents")
+
+# Size hard-cap before even downloading. Real statements weigh <1 MB
+# (one-month = ~300 KB). Anything above 15 MB is either a scan (not our
+# territory) or a DoS attempt. Railway container has ~512 MB RAM — a 50 MB
+# malformed PDF through pdfminer eats the process.
+MAX_PDF_BYTES = 15 * 1024 * 1024
+# Soft deadline for the pdfminer.extract_text call — a malformed PDF can
+# spin pdfminer indefinitely.
+PDF_EXTRACT_TIMEOUT_SEC = 60
 
 
 def _is_whitelisted(user_id: int) -> bool:
@@ -41,6 +55,15 @@ async def on_pdf(message: Message) -> None:
         return
     doc = message.document
     if doc is None:
+        return
+
+    # Pre-download size gate.
+    if doc.file_size and doc.file_size > MAX_PDF_BYTES:
+        await message.reply(
+            f"PDF большой ({doc.file_size // 1024 // 1024} МБ). "
+            f"Лимит {MAX_PDF_BYTES // 1024 // 1024} МБ — такие не тяну. "
+            "Если это скан — пришли фото страниц."
+        )
         return
 
     await message.reply(
@@ -60,8 +83,18 @@ async def on_pdf(message: Message) -> None:
     pdf_bytes = buf.getvalue()
     try:
         # pdfminer is CPU-bound and synchronous — off to a worker thread so
-        # we don't freeze polling while a fat statement is parsed.
-        text = await asyncio.to_thread(extract_pdf_text, pdf_bytes)
+        # we don't freeze polling while a fat statement is parsed. Wrap in
+        # wait_for so a malformed PDF can't stall us forever.
+        text = await asyncio.wait_for(
+            asyncio.to_thread(extract_pdf_text, pdf_bytes),
+            timeout=PDF_EXTRACT_TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        log.warning("pdf_extract_timeout", file_name=doc.file_name)
+        await message.reply(
+            "PDF парсится слишком долго — либо битый, либо гигантский. Не взял."
+        )
+        return
     except Exception:
         log.exception("pdf_extract_failed")
         await message.reply(
@@ -74,9 +107,14 @@ async def on_pdf(message: Message) -> None:
         return
 
     is_sber = is_sber_statement(text)
+    # Non-Sber PDFs = random bank statements / contracts / receipts. Never
+    # auto-parse into operations; treat as an analysis-only doc.
+    hint = SBER_HINT if is_sber else ALIEN_PDF_HINT
     header = (
-        f"[PDF-документ: {doc.file_name}, {doc.file_size or '?'}B]\n"
-        + (SBER_HINT + "\n\n" if is_sber else "")
+        f"[PDF-документ: {doc.file_name}, {doc.file_size or '?'}B, "
+        f"is_sber={is_sber}]\n"
+        + hint
+        + "\n\n"
         + text
     )
 

@@ -2,6 +2,157 @@
 
 ## [Unreleased]
 
+## [0.4.0-apple-polish] — 2026-04-20
+
+Giant audit pass + advisor mode + personality uncensoring, driven by a
+day of live-prod pain points (Казах-side).
+
+### Security
+
+- **Callback forgery fix** — only the op's creator or the owner can
+  confirm / cancel a pending_op card. Previously anyone seeing the
+  callback_data could fire someone else's operation.
+- **Whitelist tightened** — `MAIN_CHAT_ID` no longer grants access to
+  non-whitelisted users. Main-group is now a routing signal only.
+  Works for both `Message` and `CallbackQuery` events.
+- **Owner-gated commands** — `/silent`, `/resync`, `/avatar`, and
+  `/keywords add|remove` now require `OWNER_TG_USER_ID`. Listing
+  keywords / inspecting silent state stays open to the team.
+- **Log secret redaction** — structlog processor scrubs Anthropic
+  keys, TG bot tokens, Bearer tokens, and DSN creds from every log
+  event before output.
+- **PDF DoS guards** — 15 MB size cap, 60 s extract timeout. 
+  Non-Sber PDFs never auto-parse into operations.
+- **Voice DoS guard** — 180 s hard timeout on faster-whisper so a
+  pathological OGG can't freeze polling.
+- **Rate limit** is now per-`(user, chat)` instead of per-user; a
+  single user can't fan out across chats to multiply their budget.
+
+### Bot honesty / LLM prompts
+
+- **`CORE_INSTRUCTIONS`** rewritten. Strong "no lies about own
+  capabilities" rule: bot must not deny Vision on stickers (prod
+  sample: bot said "only emoji" while Vision descriptions were
+  rendered right there in its system prompt).
+- **Sticker hallucination fix** — prompt now requires the bot to
+  read `recent_history` for its own sends and quote the actual
+  description instead of fabricating ("Сбер там" when the sticker
+  was Blizzard).
+- **"Я забыл из памяти" lie removed** — instructions explain what the
+  bot can actually delete (pending_ops via ❌, operations via
+  `/undo`) and what it can't.
+- **`PERSONALITY_PROMPT`** unclamped. Removed "мат — не сыпать"
+  governor per Казах's explicit request. Added explicit anti-
+  corporate framing and the 7 tone rules.
+- **Operation detection from free speech** — analyzer now looks for
+  operations in voice transcripts / casual phrasing without
+  requiring literal "запиши". Confidence ≥ 0.75 or the operation
+  goes out with `ambiguities` for the user to resolve.
+
+### PDF policy hardening
+
+- `SBER_HINT` now enforces THREE conditions before any auto-parse:
+  (a) explicit user request (concrete token list from
+  `has_explicit_ingest_request`), (b) document is our team's
+  account, (c) confidence ≥ 0.8. Any miss → `operations=[]` with a
+  "это по нашему счёту?" follow-up.
+- `ALIEN_PDF_HINT` added — non-Sber PDFs get a stricter "don't parse,
+  summarize only" instruction block. Fixes the live-prod case where
+  an alien client's bank statement (Сельвян Андрей) was turned into
+  14 expense preview cards.
+
+### Voice pipeline
+
+- Whisper `initial_prompt` expanded with partners, clients,
+  suppliers, and business vocab (додеп, откуп, пятерик, нотариалка,
+  контора, Rapira, TapBank, ...). Filters Latin tokens to avoid
+  Whisper transliterating Russian speech into ASCII.
+- KB entity names (alias + entity with a `key`) now feed into the
+  Whisper prompt — learns new names as the team teaches them.
+- `_postprocess_transcript()` fixes common Whisper mishears
+  ("Вержан"→"ержан", "нахуят"→"нахуя ты", "alkaz"→"алказ", ...).
+- OGG retention extended 72h → 14d so we can re-transcribe after a
+  model upgrade / debug a garbled transcript.
+
+### Finance math guards
+
+- **Exchange math** — applier now validates `amount_rub / fx_rate ≈
+  amount_usdt` within 0.5%, rejects zero/negative, and catches the
+  classic `amount_usdt <-> fx_rate` swap before it hits the DB.
+- **POA partner validation** — two-pass: (1) shape + sum check, (2)
+  each partner must exist in `partners` via `resolve_partner`.
+  Prevents ghost shares silently dropping when attach_exchange runs.
+- **Cabinet auto_code race** — select-then-insert retry loop on
+  unique-violation. Single-bot traffic rarely collides, but the
+  prior `COUNT(*)+1` could duplicate codes under concurrent creates.
+
+### Knowledge base
+
+- **Fuzzy dedup** in `add_fact` — merges near-duplicates (≥0.85
+  Ratcliff-Obershelp) within same category/key. Fixes prod case
+  where "Рапира биржа" and "Рапира — биржа." became two rows.
+- **Migration `f3a10012kbclean`** — deactivates the two junk
+  "для будущего" rule rows + all duplicate `рапа` aliases except
+  the earliest, purges >7d expired/cancelled pending_ops.
+
+### Stickers
+
+- **Pack theme** — new `seen_stickers.pack_theme` column for
+  thematic tagging of whole packs. `kontorapidarasov` seeded as
+  `сбер-мем` (120 stickers) so "сбер"-themed picks land in the
+  right pack even if no individual sticker description matches.
+- **`sticker_theme_hint`** — new field on `BatchAnalysis` +
+  pick_smart. Four-level fallback cascade: theme is the pin,
+  description narrows, emoji tie-breaks, drop one at a time.
+- **Described catalog** — system prompt now shows theme next to
+  pack name so Claude sees what themes exist.
+
+### Advisor mode (proactive)
+
+New `src/core/advisor.py` with three nudges:
+
+- **balance_vs_cabinet** — if /balance asked recently AND a cabinet
+  has been in_use 12+ h → one nudge.
+- **client_repeat** — known client mentioned 3+ times in 24h with no
+  POA logged → suggest creating one.
+- **fx_drift** — two latest fx snapshots differ by ≥ 5% → flag it.
+
+De-duped via the same `pending_reminders` machinery.
+
+### Quiet hours
+
+All chat-sending reminders (+ advisor jobs) now muted during
+Moscow-night (22:00–09:00 local = 19:00–06:00 UTC). Pending-op expiry
+and voice-OGG wipe run regardless (no chat message side-effect).
+
+### UX polish
+
+- Rewrote `HELP_TEXT` — shorter, scannable, accurate command list.
+- `BOT_COMMANDS` list (bot's `/` menu) populated with all 20 live
+  commands. Was effectively 11 before; 9 were invisible.
+- Preview cards use KB-preference rounding: USDT → `$1`, RUB ≥ 10k
+  → `100₽`. Exchange preview shows the full formula inline:
+  `280 000 ₽ @ 80.46 ₽/USDT = 3 480$`.
+
+### Ops
+
+- **Drain timeout** 15s → 45s so Claude-API retries don't lose
+  preview-card sends on SIGTERM.
+- **Periodic purge** — new job hard-deletes `pending_ops` with
+  status in (expired, cancelled) older than 7 days (previously
+  just-marked; table grew indefinitely).
+
+### Tests
+
+Added 7 new test files (92 passing total):
+
+- `test_applier_exchange_math.py` — math guards.
+- `test_knowledge_dedup.py` — fuzzy similarity threshold.
+- `test_voice_postprocess.py` — mishear fixes + prompt builder.
+- `test_pdf_gate.py` — SBER vs ALIEN hints + explicit tokens.
+- `test_log_redaction.py` — secret scrubbing.
+- `test_reminders_quiet_window.py` — night-mode gate.
+
 ## [0.3.0-audit] — 2026-04-19
 
 Full audit pass + voice features + behaviour tuning.

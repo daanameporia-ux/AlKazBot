@@ -142,11 +142,42 @@ async def apply(
     f = op.fields
 
     if intent == Intent.EXCHANGE.value:
+        amount_rub = _req_dec(f.get("amount_rub"), "amount_rub")
+        amount_usdt = _req_dec(f.get("amount_usdt"), "amount_usdt")
+        fx_rate = _positive_fx(_req_dec(f.get("fx_rate"), "fx_rate"))
+        if amount_rub <= 0 or amount_usdt <= 0:
+            raise ApplyError(
+                f"Обмен с нулевой/отрицательной суммой: "
+                f"{amount_rub}₽ / {amount_usdt} USDT. Не записываю."
+            )
+        # Classic mix-up: amount_usdt and fx_rate swapped. For RUB/USDT
+        # the rate is always double-digit (60-120), amount_usdt is much
+        # larger. Refuse before we write garbage.
+        if amount_usdt < fx_rate:
+            raise ApplyError(
+                f"Похоже amount_usdt и fx_rate поменяли местами: "
+                f"{amount_rub}/{amount_usdt}={fx_rate}. "
+                "Проверь — USDT должен быть >> курса."
+            )
+        # Math check: amount_rub / fx_rate ≈ amount_usdt, ±0.5%.
+        expected_usdt = amount_rub / fx_rate
+        diff_pct = (
+            abs(expected_usdt - amount_usdt) / amount_usdt * Decimal("100")
+            if amount_usdt
+            else Decimal("0")
+        )
+        if diff_pct > Decimal("0.5"):
+            raise ApplyError(
+                f"Арифметика не сходится: {amount_rub}₽ / {fx_rate} = "
+                f"{expected_usdt:.2f} USDT, в операции {amount_usdt} "
+                f"(расхождение {diff_pct:.2f}%). "
+                "Перепроверь числа и пришли заново."
+            )
         ex = await exchange_repo.create(
             session,
-            amount_rub=_req_dec(f.get("amount_rub"), "amount_rub"),
-            amount_usdt=_req_dec(f.get("amount_usdt"), "amount_usdt"),
-            fx_rate=_positive_fx(_req_dec(f.get("fx_rate"), "fx_rate")),
+            amount_rub=amount_rub,
+            amount_usdt=amount_usdt,
+            fx_rate=fx_rate,
             raw_input=op.summary,
             created_by_user_id=user_id,
         )
@@ -164,6 +195,11 @@ async def apply(
                 )
             fx = await _resolve_fx(session, fx)
             amount_usdt = amount_rub / fx
+        if (amount_rub is not None and amount_rub < 0) or amount_usdt < 0:
+            raise ApplyError(
+                "Расход с отрицательной суммой. "
+                "Если это возврат — сообщи иначе, не как expense."
+            )
         ex = await expense_repo.create(
             session,
             category=str(f.get("category") or "other"),
@@ -214,9 +250,20 @@ async def apply(
         if not client_name:
             raise ApplyError("Не указано имя клиента.")
         client_share_pct = _req_dec(f.get("client_share_pct"), "client_share_pct")
+        if client_share_pct < 0 or client_share_pct > 100:
+            raise ApplyError(
+                f"Доля клиента {client_share_pct}% вне диапазона 0-100. Проверь."
+            )
+        amount_rub = _req_dec(f.get("amount_rub"), "amount_rub")
+        if amount_rub <= 0:
+            raise ApplyError(
+                f"Сумма снятия не положительная: {amount_rub}. Не записываю."
+            )
         partner_shares_raw = list(f.get("partner_shares") or [])
 
-        # Validate each share and total — must sum to 100 - client_share_pct
+        # Pass 1: shape validation (name non-empty, pct > 0) and sum check.
+        # Done before partner-existence lookup so the sum error message —
+        # which is the most common user mistake — shows up first.
         clean_shares: list[dict[str, Any]] = []
         total_share = Decimal("0")
         for s in partner_shares_raw:
@@ -238,11 +285,23 @@ async def apply(
                 "Уточни и повтори."
             )
 
+        # Pass 2: partner-in-DB check. If a share references a partner
+        # that doesn't exist, attach_exchange would silently drop their
+        # contribution later — fail loudly here instead.
+        for sh in clean_shares:
+            p = await partner_repo.resolve_partner(session, sh["partner"])
+            if p is None:
+                raise ApplyError(
+                    f"Партнёр «{sh['partner']}» не в базе. Добавь через "
+                    "`/knowledge add Партнёр ...` или уточни имя."
+                )
+            sh["partner"] = p.name  # canonical form
+
         c = await client_repo.get_or_create(session, client_name)
         poa = await poa_repo.create_pending(
             session,
             client_id=c.id,
-            amount_rub=_req_dec(f.get("amount_rub"), "amount_rub"),
+            amount_rub=amount_rub,
             partner_shares=clean_shares,
             client_share_pct=client_share_pct,
             notes=op.summary,

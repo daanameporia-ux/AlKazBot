@@ -19,11 +19,18 @@ CAB_STATUSES = (
 )
 
 
+_MAX_AUTO_CODE_ATTEMPTS = 10
+
+
 async def _next_auto_code(session: AsyncSession) -> str:
-    """'Cab-042' rolling counter, zero-padded."""
-    res = await session.execute(select(func.count(Cabinet.id)))
-    n = (res.scalar_one() or 0) + 1
-    return f"Cab-{n:03d}"
+    """'Cab-042' rolling counter based on max(id)+1.
+
+    Not a sequence (we'd need a migration); instead, we retry on collision.
+    Under any realistic concurrency (single-bot, 1-2 ops/sec) this is plenty.
+    """
+    res = await session.execute(select(func.max(Cabinet.id)))
+    max_id = res.scalar_one() or 0
+    return f"Cab-{max_id + 1:03d}"
 
 
 async def create(
@@ -37,21 +44,47 @@ async def create(
     received_date: date | None = None,
     notes: str | None = None,
 ) -> Cabinet:
-    code = await _next_auto_code(session)
-    cab = Cabinet(
-        name=name,
-        auto_code=code,
-        cost_rub=cost_rub,
-        cost_usdt=cost_usdt,
-        fx_rate=fx_rate,
-        received_date=received_date or date.today(),
-        prepayment_id=prepayment_id,
-        status="in_stock",
-        notes=notes,
-    )
-    session.add(cab)
-    await session.flush()
-    return cab
+    from sqlalchemy.exc import IntegrityError
+
+    # Retry loop: if two concurrent creates pick the same auto_code, one
+    # hits the UNIQUE violation — we bump and try again. In practice this
+    # fires almost never; the retry is just belt-and-suspenders.
+    attempt = 0
+    while True:
+        attempt += 1
+        code = await _next_auto_code(session)
+        # If something else already claimed this auto_code (races), bump.
+        existing = await session.execute(
+            select(Cabinet.id).where(Cabinet.auto_code == code)
+        )
+        if existing.first() is not None:
+            if attempt >= _MAX_AUTO_CODE_ATTEMPTS:
+                raise RuntimeError(
+                    f"auto_code exhaustion after {_MAX_AUTO_CODE_ATTEMPTS} retries"
+                )
+            # Force a bump by inserting a "probe" style increment —
+            # simplest: recompute from max again next loop.
+            continue
+        cab = Cabinet(
+            name=name,
+            auto_code=code,
+            cost_rub=cost_rub,
+            cost_usdt=cost_usdt,
+            fx_rate=fx_rate,
+            received_date=received_date or date.today(),
+            prepayment_id=prepayment_id,
+            status="in_stock",
+            notes=notes,
+        )
+        session.add(cab)
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            if attempt >= _MAX_AUTO_CODE_ATTEMPTS:
+                raise
+            continue
+        return cab
 
 
 async def find_by_name_or_code(
