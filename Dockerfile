@@ -26,5 +26,14 @@ RUN uv sync --frozen --no-dev || uv sync --no-dev
 # no `uv run` at runtime (which triggered a fresh sync on every start).
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Pre-download the Whisper model so the first voice transcription
+# doesn't stall a user for ~60s on model download.
+RUN python -c "from faster_whisper import WhisperModel; \
+WhisperModel('small', device='cpu', compute_type='int8', download_root='/app/.whisper-cache')" \
+  || echo "whisper model prefetch skipped"
+
+ENV HF_HOME=/app/.whisper-cache \
+    FASTER_WHISPER_CACHE_DIR=/app/.whisper-cache
+
 # Long-polling — no HTTP port to expose.
 CMD ["python", "-m", "src.bot.main"]

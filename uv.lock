@@ -1083,6 +1083,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "apscheduler" },
     { name = "asyncpg" },
+    { name = "faster-whisper" },
     { name = "httpx" },
     { name = "orjson" },
     { name = "pdfminer-six" },
@@ -1106,11 +1107,6 @@ dev = [
     { name = "types-python-dateutil" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "faster-whisper" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "aiogram", specifier = ">=3.13,<4" },
@@ -1118,6 +1114,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.39,<1" },
     { name = "apscheduler", specifier = ">=3.10,<4" },
     { name = "asyncpg", specifier = ">=0.29,<1" },
+    { name = "faster-whisper", specifier = ">=1.2,<2" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.12,<2" },
     { name = "orjson", specifier = ">=3.10,<4" },
@@ -1137,9 +1134,6 @@ requires-dist = [
     { name = "types-python-dateutil", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "faster-whisper", specifier = ">=1.2.1" }]
 
 [[package]]
 name = "sentry-sdk"
