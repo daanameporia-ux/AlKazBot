@@ -120,6 +120,17 @@ _WHISPER_PROMPT_LEAD = (
 )
 
 
+def _is_cyrillic_word(s: str) -> bool:
+    """True if the string contains at least one Cyrillic letter and no
+    ASCII Latin letters. Used to strip ASCII keywords from the Whisper
+    hint — otherwise the model biases toward Latin output ("Алкаш" →
+    "Alkaz") because ASCII tokens in the prompt encourage romanization.
+    """
+    has_cyr = any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in s)
+    has_lat = any("a" <= ch.lower() <= "z" for ch in s)
+    return has_cyr and not has_lat
+
+
 def _build_whisper_prompt(keywords: list[str]) -> str | None:
     """Craft a compact initial_prompt for faster-whisper that lists
     project-specific vocabulary (bot nicknames, role words, slang).
@@ -128,17 +139,28 @@ def _build_whisper_prompt(keywords: list[str]) -> str | None:
     "already seen" before transcription starts, so listing words here
     sharply improves recall on those exact tokens. Cap at 224 tokens
     per faster-whisper docs — our list is tiny, well under limit.
+
+    IMPORTANT: only pure-Cyrillic keywords are included in the prompt.
+    Mixing ASCII (e.g. "al_kazbot") encourages Whisper to transcribe
+    Russian speech in Latin letters ("Алкаш" → "Alkaz"), which then
+    defeats substring matching against the DB's Cyrillic canonical
+    forms. Latin variants of keywords still live in `trigger_keywords`
+    and will catch anything that slips through anyway.
     """
     if not keywords:
         return None
-    # Deduplicate preserving order; lowercase for consistency.
     seen: set[str] = set()
     ordered: list[str] = []
     for k in keywords:
         lo = k.strip().lower()
-        if lo and lo not in seen:
-            seen.add(lo)
-            ordered.append(lo)
+        if not lo or lo in seen:
+            continue
+        if not _is_cyrillic_word(lo):
+            continue
+        seen.add(lo)
+        ordered.append(lo)
+    if not ordered:
+        return None
     vocab = ", ".join(ordered)
     return f"{_WHISPER_PROMPT_LEAD} Позывные и роли: {vocab}."
 
