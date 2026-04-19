@@ -79,7 +79,11 @@ async def _release_voice_lock(voice_id: int) -> None:
             _voice_locks.pop(voice_id, None)
 
 
-def _transcribe_sync(ogg: bytes, language: str = "ru") -> str:
+def _transcribe_sync(
+    ogg: bytes,
+    language: str = "ru",
+    initial_prompt: str | None = None,
+) -> str:
     model = _load_model()
     # faster-whisper wants a filesystem path.
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
@@ -87,15 +91,56 @@ def _transcribe_sync(ogg: bytes, language: str = "ru") -> str:
         path = f.name
     try:
         segments, _info = model.transcribe(
-            path, language=language, vad_filter=True
+            path,
+            language=language,
+            vad_filter=True,
+            initial_prompt=initial_prompt,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()
     finally:
         Path(path).unlink(missing_ok=True)
 
 
-async def transcribe_bytes(ogg: bytes, *, language: str = "ru") -> str:
-    return await asyncio.to_thread(_transcribe_sync, ogg, language)
+async def transcribe_bytes(
+    ogg: bytes,
+    *,
+    language: str = "ru",
+    initial_prompt: str | None = None,
+) -> str:
+    return await asyncio.to_thread(
+        _transcribe_sync, ogg, language, initial_prompt
+    )
+
+
+# Static lead text — "sets the scene" so Whisper biases toward chat-style
+# Russian instead of defaulting to cleaner dictation. The dynamic keyword
+# list is appended per-call inside `_build_whisper_prompt`.
+_WHISPER_PROMPT_LEAD = (
+    "Разговор в Telegram-чате про Сбер-кабинеты, POA, обмен RUB на USDT."
+)
+
+
+def _build_whisper_prompt(keywords: list[str]) -> str | None:
+    """Craft a compact initial_prompt for faster-whisper that lists
+    project-specific vocabulary (bot nicknames, role words, slang).
+
+    Whisper's initial_prompt is treated as prior context the model has
+    "already seen" before transcription starts, so listing words here
+    sharply improves recall on those exact tokens. Cap at 224 tokens
+    per faster-whisper docs — our list is tiny, well under limit.
+    """
+    if not keywords:
+        return None
+    # Deduplicate preserving order; lowercase for consistency.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for k in keywords:
+        lo = k.strip().lower()
+        if lo and lo not in seen:
+            seen.add(lo)
+            ordered.append(lo)
+    vocab = ", ".join(ordered)
+    return f"{_WHISPER_PROMPT_LEAD} Позывные и роли: {vocab}."
 
 
 async def transcribe_voice_row(
@@ -122,7 +167,22 @@ async def transcribe_voice_row(
             if not row.ogg_data:
                 return None
 
-            text = await transcribe_bytes(bytes(row.ogg_data))
+            # Pull active keywords and bake them into a Whisper prompt so
+            # the model doesn't mis-hear "бот" as "бод" / "вот". Failure
+            # to build the prompt (e.g. DB transient error) falls back to
+            # unbiased transcription — not a blocker.
+            prompt: str | None = None
+            try:
+                from src.core.keyword_match import get_active_keywords
+
+                kws = await get_active_keywords()
+                prompt = _build_whisper_prompt(kws)
+            except Exception:
+                log.exception("whisper_prompt_build_failed")
+
+            text = await transcribe_bytes(
+                bytes(row.ogg_data), initial_prompt=prompt
+            )
             if not text:
                 text = "(тишина)"
 

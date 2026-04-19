@@ -75,3 +75,14 @@ async def find_hits(text: str) -> list[str]:
 async def has_trigger(text: str) -> bool:
     """Convenience wrapper — True if at least one keyword hit."""
     return len(await find_hits(text)) > 0
+
+
+async def get_active_keywords() -> list[str]:
+    """Public accessor for the cached active-keyword list.
+
+    Used by voice transcription to build a Whisper `initial_prompt`
+    so the model is biased toward recognising our trigger words
+    correctly (otherwise it mishears short Russian words like
+    "бот" → "бод" / "вот").
+    """
+    return list(await _ensure_cache())
