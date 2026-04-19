@@ -7,7 +7,6 @@ voice as a trigger — so every voice gets an answer just like text does.
 
 from __future__ import annotations
 
-import asyncio
 import io
 
 from aiogram import F, Router
@@ -71,18 +70,8 @@ async def on_voice(message: Message) -> None:
         user=message.from_user.id,
     )
 
-    # Transcribe in the background — NO LLM trigger. Voice alone is
-    # silent; the bot only replies when the user @-mentions / replies
-    # to the bot afterwards (mention handler transcribes on demand if
-    # we haven't finished yet, and fires its own flush).
-    from src.core.voice_trigger import transcribe_only
-
-    task = asyncio.create_task(
-        transcribe_only(voice_id),
-        name=f"voice-transcribe-{voice_id}",
-    )
-    _pending_voice_tasks.add(task)
-    task.add_done_callback(_pending_voice_tasks.discard)
-
-
-_pending_voice_tasks: set[asyncio.Task] = set()
+    # NO automatic transcription. Voice notes are just stored; whisper
+    # only runs when a user explicitly addresses the bot about this
+    # voice (via @-mention or reply within 5 s — mention handler does
+    # the transcribe on demand). Everything else stays as OGG bytes
+    # until the dev manually runs `scripts/transcribe_voices.py`.

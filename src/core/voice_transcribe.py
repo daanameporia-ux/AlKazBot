@@ -148,16 +148,21 @@ async def transcribe_voice_row(
             await _release_voice_lock(voice_id)
 
 
+MENTION_LINK_WINDOW_SEC = 5
+
+
 async def find_recent_voice_by_user(
     session: AsyncSession,
     *,
     chat_id: int,
     tg_user_id: int,
-    within_seconds: int = 600,
+    within_seconds: int = MENTION_LINK_WINDOW_SEC,
 ) -> VoiceMessage | None:
-    """Most recent untranscribed voice from this user in this chat, within
-    a short window. Used when the user @-mentions the bot right after a
-    voice note — we pair them.
+    """Most recent voice from this user in this chat, within a short window.
+    Used when the user @-mentions the bot right after a voice note — we
+    treat it as "this voice is addressed to the bot" only if the
+    mention comes fast enough (default 5 s). Otherwise the voice is
+    considered a side-chat between humans and the bot stays out.
     """
     from datetime import timedelta
 
@@ -167,7 +172,6 @@ async def find_recent_voice_by_user(
         .where(
             VoiceMessage.chat_id == chat_id,
             VoiceMessage.tg_user_id == tg_user_id,
-            VoiceMessage.transcribed_text.is_(None),
             VoiceMessage.created_at >= cutoff,
         )
         .order_by(VoiceMessage.id.desc())

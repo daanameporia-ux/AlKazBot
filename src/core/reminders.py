@@ -282,23 +282,11 @@ async def _maybe_prank(bot: Bot) -> None:
         log.exception("prank_check_failed")
 
 
-async def _transcribe_pending_voices(bot: Bot) -> None:
-    """Run the local faster-whisper over any voice_messages that haven't
-    been transcribed yet. Wipes OGG bytes as part of transcribe_voice_row.
-    Cap to 5 per tick to stay polite on CPU.
-    """
-    from src.core.voice_transcribe import transcribe_voice_row
-    from src.db.repositories import voice as voice_repo
-
-    async with session_scope() as session:
-        pending = await voice_repo.list_pending(session, limit=5)
-    for row in pending:
-        try:
-            async with session_scope() as session:
-                text = await transcribe_voice_row(session, row.id)
-            log.info("voice_auto_transcribed", voice_id=row.id, chars=len(text or ""))
-        except Exception:
-            log.exception("voice_auto_transcribe_failed", voice_id=row.id)
+# NOTE: voice auto-transcription job intentionally removed. Per policy,
+# voices are transcribed only when a user @-mentions the bot within 5 s
+# of the voice (mention handler path), or when the developer manually
+# runs scripts/transcribe_voices.py. Everything else stays as OGG until
+# wiped by the 72 h GC job below.
 
 
 async def _wipe_stale_voice_ogg(bot: Bot) -> None:
@@ -333,7 +321,6 @@ _JOBS: list[tuple[str, Any, int]] = [
     ("client_debt_stale", _check_client_debt_stale, 60),
     ("pending_op_expiry", _check_pending_op_expiry, 15),
     ("maybe_prank", _maybe_prank, 60),
-    ("transcribe_pending_voices", _transcribe_pending_voices, 5),
     ("wipe_stale_voice_ogg", _wipe_stale_voice_ogg, 360),
 ]
 
