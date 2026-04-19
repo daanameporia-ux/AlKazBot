@@ -131,24 +131,33 @@ All conversations are in Russian. Tone spec:
   не предлагай это сам.
 - `/silent`, `/voices`, `/resync`, `/feedback` — служебные.
 
-## Стикеры (НОВОЕ — ты их отправлять можешь):
-В твоей батч-выдаче есть поле `sticker_emoji`. Если заполнишь его emoji —
-сервер подберёт стикер из собранной библиотеки (таблица `seen_stickers`,
-паки автоматически расширяются когда команда шлёт в чат что-то новое) и
-отправит как реакцию на триггер-сообщение.
+## Стикеры (умеешь отправлять, видишь картинку через описания):
+В твоей батч-выдаче три опциональных поля для стикера:
+  * `sticker_emoji` — emoji-лейбл Telegram'а (например, «🏢»). Узкий фильтр.
+  * `sticker_description_hint` — ключевое слово из описания (например,
+    «офис», «деньги», «устал»). Сервер фаззи-матчит по полю `description`
+    из библиотеки (описания сгенерированы Claude Vision).
+  * `sticker_pack_hint` — кусок имени пака (например, «kontorapidarasov»).
 
-Используй ЭКОНОМНО — только когда стикер реально в тему и добавит
-пизданутости / эмоции. Не нужно лепить стикер к каждому ответу. Подмечай
-какие стикеры команда сама шлёт и в каких контекстах — актуальные
-примеры ниже в блоке `# Стикеры`. Попадай в их вкус.
+Можно ставить любую комбинацию (пересечение фильтров) или ни одного
+(тогда стикер не отправится). Сервер выберет среди кандидатов стикер
+с меньшим `usage_count` — то есть фреш, чтобы не спамить одним и тем же.
+
+Описания стикеров ты ВИДИШЬ в блоке `# Стикеры` ниже. Там каталог по
+пакам: каждая запись «emoji — описание» (например «🏢 — мемный офис с
+неоновой вывеской КОНТОРА ПИДАРАСОВ»). Пользуйся этим чтобы выбирать
+по смыслу, а не только по эмодзи. Если юзер пишет «скинь что-нибудь
+про офис» — `sticker_description_hint="офис"` найдёт самый подходящий.
+
+Используй ЭКОНОМНО — только когда стикер реально в тему. Не лепи стикер
+к каждому ответу. Подмечай какие стикеры команда сама шлёт и в каких
+контекстах (блок «Живые примеры» внизу) — попадай в их вкус.
 
 Правила:
 - Можешь отправить и `chat_reply` текст, и стикер — прилетят оба.
 - Можешь отправить ТОЛЬКО стикер (оставь `chat_reply` пустым) если он
   говорит сам за себя.
-- Если emoji нет в библиотеке, сервер тихо скипнет — юзер ничего не заметит.
-- Смотри `# Стикеры` блок: бери emoji из реального emoji-спектра,
-  иначе промажешь.
+- Если фильтры ничего не нашли — сервер тихо скипнет, юзер не заметит.
 
 ## Что ты НЕ УМЕЕШЬ (честно):
 - Отправлять фото, видео, гифки, голосовые. Только текст + стикеры.
@@ -212,15 +221,25 @@ def render_few_shot(
 def render_sticker_context(
     *,
     pack_emojis: list[tuple[str, list[str]]] | None = None,
+    described_catalog: list[tuple[str, list[tuple[str, str, str]]]] | None = None,
     usage_examples: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render the Stickers section for the system prompt.
 
-    `pack_emojis` is `[(pack_name, [emoji1, emoji2, ...]), ...]`.
-    `usage_examples` is a list of `{who, emoji, pack, preceding_text}` dicts
-    — real sticker sends from the team with the context that preceded them.
+    Three optional data sources are merged into one block:
+
+    * `pack_emojis`        — `[(pack_name, [emoji1, emoji2, ...]), ...]`
+                             — fast emoji-spectrum glance (includes packs
+                             with no descriptions too).
+    * `described_catalog`  — `[(pack_name, [(emoji, description, fuid),
+                             ...]), ...]`. The meat: sticker-by-sticker
+                             vision captions so Claude picks by meaning,
+                             not just emoji label.
+    * `usage_examples`     — `[{who, emoji, pack, preceding_text}, ...]`
+                             real recent sends from team members with
+                             the context that preceded each.
     """
-    if not pack_emojis and not usage_examples:
+    if not pack_emojis and not described_catalog and not usage_examples:
         return (
             "# Стикеры\n"
             "(библиотека пустая — команда ещё не присылала стикеров. "
@@ -228,8 +247,6 @@ def render_sticker_context(
         )
     parts = ["# Стикеры"]
     if pack_emojis:
-        # Unique emoji-spectrum across all packs — Claude sees at a glance
-        # what emojis can actually resolve to real stickers.
         all_emojis: list[str] = []
         seen: set[str] = set()
         for _pack, emojis in pack_emojis:
@@ -241,7 +258,18 @@ def render_sticker_context(
             "## Доступный emoji-спектр (ставь только эти в `sticker_emoji`):"
         )
         parts.append(" ".join(all_emojis) if all_emojis else "(пока пусто)")
-        parts.append("\n## Паки в библиотеке:")
+    if described_catalog:
+        parts.append(
+            "\n## Каталог по сюжету (бери и emoji, и смысл — пиши "
+            "`sticker_description_hint` если нужна конкретика):"
+        )
+        for pack, stickers in described_catalog:
+            parts.append(f"\n### `{pack}` ({len(stickers)} описаны)")
+            for emoji, desc, _fuid in stickers:
+                parts.append(f"  - {emoji or '—'} — {desc}")
+    elif pack_emojis:
+        # Fallback — no descriptions yet, show raw per-pack emojis.
+        parts.append("\n## Паки в библиотеке (без описаний пока):")
         for pack, emojis in pack_emojis:
             sample = " ".join(emojis[:18])
             more = f" +{len(emojis) - 18}" if len(emojis) > 18 else ""
@@ -267,6 +295,9 @@ def build_system_blocks(
     knowledge_items: list[dict[str, Any]] | None = None,
     few_shot_examples: list[dict[str, Any]] | None = None,
     sticker_pack_emojis: list[tuple[str, list[str]]] | None = None,
+    sticker_described_catalog: list[
+        tuple[str, list[tuple[str, str, str]]]
+    ] | None = None,
     sticker_usage_examples: list[dict[str, Any]] | None = None,
     recent_messages: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -291,6 +322,7 @@ def build_system_blocks(
             "type": "text",
             "text": render_sticker_context(
                 pack_emojis=sticker_pack_emojis,
+                described_catalog=sticker_described_catalog,
                 usage_examples=sticker_usage_examples,
             ),
             "cache_control": {"type": "ephemeral"},

@@ -521,6 +521,9 @@ class SeenSticker(Base):
     )
     last_used: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     usage_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    description_model: Mapped[str | None] = mapped_column(Text)
+    described_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class StickerUsage(Base):

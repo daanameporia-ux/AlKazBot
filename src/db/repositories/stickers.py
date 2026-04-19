@@ -180,3 +180,90 @@ async def pack_emoji_summary(
             by_pack[pack].add(emoji)
     ranked = sorted(by_pack.items(), key=lambda kv: -len(kv[1]))
     return [(p, sorted(e)) for p, e in ranked[:pack_limit]]
+
+
+async def described_catalog(
+    session: AsyncSession,
+    *,
+    per_pack: int = 20,
+    pack_limit: int = 10,
+) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    """Per-pack catalog with Vision descriptions.
+
+    Returns `[(pack_name, [(emoji, description, file_unique_id), ...]), ...]`
+    where each inner tuple is a described sticker. Only stickers with
+    `description IS NOT NULL` are included. Packs sorted by described-
+    count descending; inner list ordered by `usage_count DESC`
+    (stickers the team actually loves first) then by id.
+
+    Cap `per_pack` so the system-prompt block stays in cache-friendly
+    territory. `pack_limit` bounds the total pack count.
+    """
+    res = await session.execute(
+        select(
+            SeenSticker.sticker_set,
+            SeenSticker.emoji,
+            SeenSticker.description,
+            SeenSticker.file_unique_id,
+            SeenSticker.usage_count,
+        )
+        .where(
+            SeenSticker.sticker_set.isnot(None),
+            SeenSticker.description.isnot(None),
+        )
+        .order_by(SeenSticker.usage_count.desc(), SeenSticker.id.asc())
+    )
+    by_pack: dict[str, list[tuple[str, str, str]]] = {}
+    for pack, emoji, desc, fuid, _uc in res.all():
+        if not pack:
+            continue
+        lst = by_pack.setdefault(pack, [])
+        if len(lst) < per_pack:
+            lst.append((emoji or "", desc or "", fuid or ""))
+    ranked = sorted(by_pack.items(), key=lambda kv: -len(kv[1]))
+    return ranked[:pack_limit]
+
+
+async def pick_smart(
+    session: AsyncSession,
+    *,
+    emoji: str | None = None,
+    description_hint: str | None = None,
+    pack_hint: str | None = None,
+    limit: int = 25,
+) -> SeenSticker | None:
+    """Smarter resolver that Claude can steer via emoji + description
+    hint + pack hint. Any None filter is skipped. Final pick is random
+    among the narrowed candidates, biased toward lower usage_count
+    (freshness).
+    """
+    import random
+
+    from sqlalchemy import or_
+
+    clauses = []
+    if emoji:
+        # Strip ZWJ / variation selectors — match loose.
+        stripped = "".join(
+            ch for ch in emoji
+            if not (0xFE00 <= ord(ch) <= 0xFE0F or ord(ch) == 0x200D)
+        )
+        clauses.append(
+            or_(SeenSticker.emoji == emoji, SeenSticker.emoji == stripped)
+        )
+    if description_hint:
+        clauses.append(SeenSticker.description.ilike(f"%{description_hint}%"))
+    if pack_hint:
+        clauses.append(SeenSticker.sticker_set.ilike(f"%{pack_hint}%"))
+
+    q = select(SeenSticker).order_by(SeenSticker.usage_count.asc()).limit(limit)
+    for c in clauses:
+        q = q.where(c)
+
+    res = await session.execute(q)
+    rows = list(res.scalars().all())
+    if not rows:
+        return None
+    # Weighted pick: favour top-half (less-used) with 70% probability.
+    top_half = rows[: max(1, len(rows) // 2)]
+    return random.choice(top_half if random.random() < 0.7 else rows)

@@ -116,6 +116,24 @@ async def _runner() -> None:
         _startup_resync(), name="startup-resync"
     )
 
+    # One-shot background worker: describe any static stickers still
+    # missing a caption. First boot after the feature lands will chew
+    # through the historical library (~300 static WebPs, ~5-8 minutes
+    # at 0.8s/each); subsequent boots complete in seconds (idempotent).
+    async def _startup_describe_stickers() -> None:
+        try:
+            from src.core.sticker_describe import describe_missing
+
+            # Gentle pacing — don't slam Anthropic at boot.
+            n = await describe_missing(bot, sleep_between=0.8)
+            log.info("startup_sticker_describe_done", described=n)
+        except Exception:
+            log.exception("startup_sticker_describe_failed")
+
+    _startup_describe_task = asyncio.create_task(  # noqa: RUF006
+        _startup_describe_stickers(), name="startup-sticker-describe"
+    )
+
     # Graceful shutdown on SIGTERM (Railway redeploys send it).
     stop_event = asyncio.Event()
 

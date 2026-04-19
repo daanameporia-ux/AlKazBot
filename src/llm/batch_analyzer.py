@@ -65,6 +65,8 @@ class BatchAnalysis(BaseModel):
     chat_only: bool = False
     chat_reply: str | None = None
     sticker_emoji: str | None = None
+    sticker_description_hint: str | None = None
+    sticker_pack_hint: str | None = None
     notes: str | None = None
 
 
@@ -163,16 +165,32 @@ ANALYZE_TOOL = {
             "sticker_emoji": {
                 "type": "string",
                 "description": (
-                    "Optional emoji picking a sticker from the bot's "
-                    "sticker library. When set, the server resolves it to "
-                    "an actual sticker (matching `emoji` in `seen_stickers`) "
-                    "and sends it alongside or instead of `chat_reply`. "
-                    "Use sparingly — only when a sticker is genuinely the "
-                    "funniest / most on-point reaction for the moment. "
-                    "If no sticker matches the emoji in our library, the "
-                    "bot falls back to sending only `chat_reply`. "
-                    "See the 'Стикеры' block in the system prompt for the "
-                    "current emoji spectrum available."
+                    "Optional emoji label to narrow sticker pick. Matches "
+                    "exactly (with variation-selector/ZWJ stripping). Pick "
+                    "from the spectrum listed in the 'Стикеры' system "
+                    "block."
+                ),
+            },
+            "sticker_description_hint": {
+                "type": "string",
+                "description": (
+                    "Optional free-text substring matched (case-insensitive, "
+                    "ILIKE '%...%') against the Vision-generated "
+                    "`description` column of `seen_stickers`. The field is "
+                    "Russian, so send a Russian noun/verb (e.g. 'офис', "
+                    "'деньги', 'устал', 'кот', 'мешок'). Combine with "
+                    "`sticker_emoji` for narrower picks or use alone when "
+                    "no obvious emoji fits the mood. Read the '## Каталог "
+                    "по сюжету' section of the 'Стикеры' block to see what "
+                    "descriptions are available."
+                ),
+            },
+            "sticker_pack_hint": {
+                "type": "string",
+                "description": (
+                    "Optional substring of a pack name to restrict the "
+                    "pick to a specific pack (e.g. 'kontorapidarasov'). "
+                    "Use when you specifically want the feel of one pack."
                 ),
             },
             "notes": {
@@ -216,6 +234,22 @@ If there are no operations AND there IS a trigger message:
 If there are no operations AND there's no trigger (purely passive
 analysis of buffered chit-chat): set `chat_only=true`, leave
 `chat_reply` empty. The bot will stay silent.
+
+## PDF / банковские выписки — НЕ автопарсить в операции
+
+Если в батче пришёл `trigger_kind=document` (юзер прислал PDF), по
+умолчанию **НЕ создавай операции** из содержимого. Верни
+`operations=[]` и в `chat_reply` дай короткую сводку: что за
+документ, ключевые цифры (итого пришло / ушло / остаток, диапазон
+дат), необычное. Весь текст документа остаётся в recent_history —
+юзер может задать follow-up вопросы, отвечай по нему.
+
+Парсить в операции разрешается ТОЛЬКО если юзер явно попросил:
+словами «запиши», «внеси», «оформи операции», «занеси в учёт»,
+«создай wallet_snapshot» и т.п. (может быть в том же сообщении с
+PDF, или в следующем триггере). Без явного запроса — молчи про
+операции, отвечай текстом. См. также SBER_HINT, встраиваемый в PDF
+сбера — там детали по разметке строк.
 
 ## Teaching (`knowledge_teach`) specifics
 
@@ -310,12 +344,19 @@ async def _collect_few_shot() -> list[dict[str, Any]]:
 
 
 async def _collect_sticker_context() -> tuple[
-    list[tuple[str, list[str]]], list[dict[str, Any]]
+    list[tuple[str, list[str]]],
+    list[tuple[str, list[tuple[str, str, str]]]],
+    list[dict[str, Any]],
 ]:
-    """Pull (pack_emoji_summary, usage_examples) for the Stickers system
-    block. Empty-safe — returns ([], []) if the library is bare."""
+    """Pull (pack_emoji_summary, described_catalog, usage_examples) for
+    the Stickers system block. Each element may be empty; caller handles
+    empty-safe rendering.
+    """
     async with session_scope() as session:
         packs = await sticker_repo.pack_emoji_summary(session, pack_limit=10)
+        catalog = await sticker_repo.described_catalog(
+            session, per_pack=20, pack_limit=10
+        )
         rows = await sticker_repo.recent_usage_examples(
             session, limit=10, humans_only=True
         )
@@ -328,7 +369,7 @@ async def _collect_sticker_context() -> tuple[
         }
         for r in rows
     ]
-    return packs, examples
+    return packs, catalog, examples
 
 
 async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
@@ -389,8 +430,13 @@ async def analyze_batch(
     few_shot_items = await _collect_few_shot()
 
     # Sticker library + usage examples so Claude knows which emojis are
-    # actually resolvable, and in what contexts the team typically reacts.
-    sticker_packs, sticker_examples = await _collect_sticker_context()
+    # actually resolvable, sees Vision descriptions for picking by meaning,
+    # and learns from recent human usage.
+    (
+        sticker_packs,
+        sticker_catalog,
+        sticker_examples,
+    ) = await _collect_sticker_context()
 
     # `recent_history` is the non-cached last system block — it changes every
     # request, so we keep the cached sections ahead of it.
@@ -398,6 +444,7 @@ async def analyze_batch(
         knowledge_items=knowledge_items,
         few_shot_examples=few_shot_items,
         sticker_pack_emojis=sticker_packs,
+        sticker_described_catalog=sticker_catalog,
         sticker_usage_examples=sticker_examples,
         recent_messages=recent_history or None,
     )

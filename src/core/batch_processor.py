@@ -34,27 +34,50 @@ async def _maybe_send_sticker(
     chat_id: int,
     reply_to: int | None,
     emoji: str | None,
+    description_hint: str | None = None,
+    pack_hint: str | None = None,
 ) -> None:
-    """If the analyzer returned a `sticker_emoji`, pick a sticker from our
-    library whose `emoji` matches and send it. Silent no-op when emoji is
-    empty or no sticker matches — `chat_reply` (if any) still went
-    through separately.
+    """If Claude set any of sticker_emoji / _description_hint / _pack_hint,
+    resolve to a real sticker from `seen_stickers` and send it. Silent
+    no-op when all three are empty or no match — `chat_reply` (if any)
+    still went through separately.
+
+    Resolution order: `pick_smart` applies all provided filters as an
+    intersection and picks among the low-`usage_count` half of results
+    (so the bot doesn't mash the same sticker repeatedly).
     """
-    if not emoji:
+    if not emoji and not description_hint and not pack_hint:
         return
     async with session_scope() as session:
-        chosen = await sticker_repo.pick_by_emoji(session, [emoji])
-        if chosen is None:
-            # Try emoji variants: strip ZWJ / variation selectors, or
-            # look into the bucket by first character.
-            stripped = "".join(
-                ch for ch in emoji
-                if not (0xFE00 <= ord(ch) <= 0xFE0F or ord(ch) == 0x200D)
+        chosen = await sticker_repo.pick_smart(
+            session,
+            emoji=emoji,
+            description_hint=description_hint,
+            pack_hint=pack_hint,
+        )
+        # Fallback: if we had both emoji AND hints and got nothing,
+        # loosen to just emoji (or just description).
+        if chosen is None and (description_hint or pack_hint):
+            chosen = await sticker_repo.pick_smart(
+                session,
+                emoji=emoji,
+                description_hint=None,
+                pack_hint=None,
             )
-            if stripped and stripped != emoji:
-                chosen = await sticker_repo.pick_by_emoji(session, [stripped])
+        if chosen is None and description_hint:
+            chosen = await sticker_repo.pick_smart(
+                session,
+                emoji=None,
+                description_hint=description_hint,
+                pack_hint=None,
+            )
         if chosen is None:
-            log.info("sticker_emoji_no_match", emoji=emoji)
+            log.info(
+                "sticker_pick_no_match",
+                emoji=emoji,
+                description_hint=description_hint,
+                pack_hint=pack_hint,
+            )
             return
         try:
             sent = await bot.send_sticker(
@@ -66,7 +89,6 @@ async def _maybe_send_sticker(
             log.exception("sticker_send_failed", emoji=emoji)
             return
         await sticker_repo.bump_usage(session, chosen.id)
-        # Log in sticker_usage so future prompts see what the bot sends.
         await sticker_repo.log_usage(
             session,
             sticker_file_unique_id=chosen.file_unique_id,
@@ -78,18 +100,17 @@ async def _maybe_send_sticker(
             preceding_text=None,
             sent_by_bot=True,
         )
-        # Record in message_log so the analyzer's recent history sees it
-        # (otherwise Claude wouldn't know it already reacted).
         await log_bot_reply(
             chat_id=chat_id,
             tg_message_id=sent.message_id,
-            text=f"[sticker {chosen.emoji or '?'}]",
+            text=f"[sticker {chosen.emoji or '?'} · {chosen.description or chosen.sticker_set or ''}]"[:200],
             intent_hint="sticker_reply",
         )
         log.info(
             "sticker_sent",
-            emoji=emoji,
+            emoji=chosen.emoji,
             pack=chosen.sticker_set,
+            description_preview=(chosen.description or "")[:60],
             file_unique_id=chosen.file_unique_id,
         )
 
@@ -178,6 +199,8 @@ def make_flush_handler(bot: Bot):
                         batch.trigger.tg_message_id if batch.trigger else None
                     ),
                     emoji=analysis.sticker_emoji,
+                    description_hint=analysis.sticker_description_hint,
+                    pack_hint=analysis.sticker_pack_hint,
                 )
             except Exception:
                 log.exception("sticker_emoji_handling_failed")

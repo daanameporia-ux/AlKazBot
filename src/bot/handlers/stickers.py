@@ -13,13 +13,16 @@ message; this handler is additive.
 
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import F, Router
 from aiogram.types import Message
 from sqlalchemy import select
 
 from src.bot.batcher import is_main_group
 from src.config import settings
-from src.db.models import MessageLog
+from src.core.sticker_describe import describe_one
+from src.db.models import MessageLog, SeenSticker
 from src.db.repositories import stickers as sticker_repo
 from src.db.session import session_scope
 from src.logging_setup import get_logger
@@ -143,3 +146,40 @@ async def on_sticker(message: Message) -> None:
         pack_size=len(pack.stickers) if st.set_name and pack else 1,
         preceding_preview=preceding[:80] if preceding else None,
     )
+
+    # Fire-and-forget describe task for any un-described static stickers
+    # we just ingested. Keeps the sticker library's caption coverage
+    # fresh without blocking this handler.
+    async def _describe_new_pack() -> None:
+        try:
+            async with session_scope() as session:
+                res = await session.execute(
+                    select(SeenSticker.id).where(
+                        SeenSticker.sticker_set == st.set_name,
+                        SeenSticker.description.is_(None),
+                        SeenSticker.is_animated.is_(False),
+                        SeenSticker.is_video.is_(False),
+                    )
+                )
+                ids = [r[0] for r in res.all()]
+            for sid in ids:
+                try:
+                    await describe_one(message.bot, sid)
+                except Exception:
+                    log.exception(
+                        "sticker_inline_describe_failed", sticker_id=sid
+                    )
+        except Exception:
+            log.exception("sticker_inline_describe_worker_failed")
+
+    if st.set_name:
+        task = asyncio.create_task(
+            _describe_new_pack(), name=f"sticker-describe-{st.set_name}"
+        )
+        # Store a reference so RUF006 doesn't complain & the task isn't GC'd.
+        _INFLIGHT_DESCRIBE_TASKS.add(task)
+        task.add_done_callback(_INFLIGHT_DESCRIBE_TASKS.discard)
+
+
+# Module-level strong-ref set for fire-and-forget describe tasks.
+_INFLIGHT_DESCRIBE_TASKS: set[asyncio.Task] = set()
