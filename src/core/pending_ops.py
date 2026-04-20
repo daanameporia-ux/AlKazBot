@@ -92,6 +92,83 @@ async def register(
         return _to_view(row)
 
 
+DEDUP_WINDOW_SEC = 120
+
+
+# Fields per intent that, together with intent + chat_id, make two ops
+# "essentially the same". Keep small — too strict and legitimate
+# near-identical ops (e.g. two separate 5k acquirings in a day) get
+# wrongly skipped. Signature is canonicalised via _signature_fields.
+_DEDUP_SIGNATURE: dict[str, tuple[str, ...]] = {
+    "prepayment_given": ("supplier", "amount_rub"),
+    "expense": ("category", "amount_rub", "amount_usdt"),
+    "exchange": ("amount_rub", "amount_usdt", "fx_rate"),
+    "partner_deposit": ("partner", "amount_usdt"),
+    "partner_withdrawal": ("partner", "amount_usdt"),
+    "cabinet_in_use": ("name_or_code",),
+    "cabinet_worked_out": ("name_or_code",),
+    "cabinet_blocked": ("name_or_code",),
+    "cabinet_recovered": ("name_or_code",),
+    "client_payout": ("client_name", "amount_usdt"),
+    "wakeword_add": ("word",),
+    # knowledge_teach can come in flurries of variations — dedup by the
+    # exact content string (case-insensitive) within the category.
+    "knowledge_teach": ("category", "key", "content"),
+}
+
+
+def _signature_fields(intent: str, fields: dict[str, Any]) -> tuple | None:
+    keys = _DEDUP_SIGNATURE.get(intent)
+    if not keys:
+        return None
+    sig: list[Any] = [intent]
+    for k in keys:
+        v = fields.get(k)
+        if isinstance(v, str):
+            v = v.strip().lower()
+        sig.append(v)
+    return tuple(sig)
+
+
+async def find_duplicate(
+    *,
+    chat_id: int,
+    intent: str,
+    fields: dict[str, Any],
+    window_sec: int = DEDUP_WINDOW_SEC,
+) -> PendingOp | None:
+    """If there's a still-pending op in the same chat with the same
+    dedup signature created within `window_sec`, return it. Otherwise
+    None.
+
+    The goal is to stop the "user says the same thing three ways in
+    a row → bot creates three cards" pattern. Expired/confirmed/
+    cancelled ops are ignored — once the card is gone, a fresh one
+    is fine.
+    """
+    sig = _signature_fields(intent, fields)
+    if sig is None:
+        return None
+    cutoff = _utcnow() - timedelta(seconds=window_sec)
+    async with session_scope() as session:
+        res = await session.execute(
+            select(PendingOperation)
+            .where(
+                PendingOperation.chat_id == chat_id,
+                PendingOperation.intent == intent,
+                PendingOperation.status == "pending",
+                PendingOperation.created_at > cutoff,
+            )
+            .order_by(PendingOperation.created_at.desc())
+            .limit(20)
+        )
+        rows = list(res.scalars().all())
+    for row in rows:
+        if _signature_fields(row.intent, dict(row.fields or {})) == sig:
+            return _to_view(row)
+    return None
+
+
 async def attach_preview(uid: str, preview_message_id: int) -> None:
     async with session_scope() as session:
         await session.execute(

@@ -328,6 +328,20 @@ async def apply(
         await _audit(session, user_id, "create", "cabinets", cab.id, new=f)
         return f"✅ Кабинет {cab.name or cab.auto_code} на склад ({cost_usdt:.2f}$)."
 
+    if intent == Intent.CABINET_IN_USE.value:
+        key = str(f.get("name_or_code") or "").strip()
+        cab = await cabinet_repo.find_by_name_or_code(session, key)
+        if cab is None:
+            raise ApplyError(f"Не нашёл кабинет: {key}")
+        if cab.status == "in_use":
+            return f"ℹ️ Кабинет {cab.name or cab.auto_code} и так в работе."
+        await cabinet_repo.set_status(session, cab.id, "in_use")
+        await _audit(
+            session, user_id, "status_change", "cabinets", cab.id,
+            old={"status": cab.status}, new={"status": "in_use"},
+        )
+        return f"✅ Кабинет {cab.name or cab.auto_code} поставлен в работу."
+
     if intent == Intent.CABINET_WORKED_OUT.value:
         key = str(f.get("name_or_code") or "").strip()
         cab = await cabinet_repo.find_by_name_or_code(session, key)

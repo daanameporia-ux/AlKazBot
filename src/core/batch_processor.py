@@ -234,6 +234,23 @@ def make_flush_handler(bot: Bot):
         )
 
         for op in analysis.operations:
+            # Dedup: if the same operation was already proposed in the
+            # last 2 min and is still pending, skip creating a duplicate
+            # card. Same user rephrasing the same thing → one card, not
+            # three. The existing card's buttons still work.
+            dup = await pending_ops.find_duplicate(
+                chat_id=batch.chat_id,
+                intent=op.intent.value,
+                fields=op.fields,
+            )
+            if dup is not None:
+                log.info(
+                    "preview_deduped",
+                    intent=op.intent.value,
+                    existing_uid=dup.uid,
+                )
+                continue
+
             entry = await pending_ops.register(
                 chat_id=batch.chat_id,
                 intent=op.intent.value,

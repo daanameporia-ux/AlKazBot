@@ -1,9 +1,20 @@
-"""Photo (and photo-as-document) intake via Claude Vision.
+"""Photo intake via Claude Vision — only on explicit trigger.
 
-User sends a photo — likely a screenshot of TapBank / Mercurio, a receipt,
-or a Sber ATM slip. We download the largest size, base64-encode it, feed
-it to Claude as a multimodal message alongside the regular batch-analyze
-prompt, and show preview cards like we do for text.
+Policy (owner request 2026-04-20): the bot must NOT parse every photo
+that lands in chat. Photos come in constantly (screenshots of incoming
+SMS, Sber balance popups, memes, casual pics) and most of them are NOT
+accounting events.
+
+A photo fires Vision only when ONE of these is true:
+  * caption contains `@Al_Kazbot` (explicit mention);
+  * caption (or a tight context window) contains a trigger keyword
+    from `trigger_keywords` — bot was addressed by nickname;
+  * user replies to the photo with an @-mention asking to look at it
+    (handled elsewhere via mentions.py — not here).
+
+Everything else: log to message_log for context, silent no-op on LLM.
+The batch analyzer can still pick up on the caption text if a later
+trigger pulls it into a batch.
 """
 
 from __future__ import annotations
@@ -19,6 +30,7 @@ from src.core import pending_ops
 from src.core.batch_processor import (
     make_flush_handler as _mk,  # noqa: F401 — warm up the import chain
 )
+from src.core.keyword_match import find_hits
 from src.core.preview import render_op_card
 from src.db.repositories import knowledge as kb_repo
 from src.db.session import session_scope
@@ -33,6 +45,21 @@ router = Router(name="photo")
 
 def _is_whitelisted(user_id: int) -> bool:
     return user_id in settings.allowed_tg_user_ids
+
+
+async def _caption_triggers_vision(caption: str, bot_username: str | None) -> bool:
+    """True iff the photo's caption invites the bot to look at it.
+
+    Criteria (OR'd):
+      * @-mention of the bot;
+      * any active trigger keyword appears as substring.
+    """
+    if not caption:
+        return False
+    if bot_username and f"@{bot_username.lower()}" in caption.lower():
+        return True
+    hits = await find_hits(caption)
+    return bool(hits)
 
 
 async def _load_kb_items() -> list[dict]:
@@ -53,17 +80,22 @@ async def _load_kb_items() -> list[dict]:
 _IMAGE_INSTRUCTION = """\
 # Image intake
 
-Пользователь прислал фото. Это может быть:
-  * скриншот банковского приложения / ATM-чека — извлеки операции (сумма,
-    время, назначение);
+Пользователь прислал фото и явно попросил тебя на него посмотреть
+(@-mention или keyword в подписи). Разбирай:
+
+  * скрин банковского приложения / ATM-чека — извлеки операции
+    (сумма, время, назначение);
   * чек из магазина — expense;
   * скрин обменника с курсом — exchange;
-  * скрин личного кабинета сервиса TapBank/Mercurio/Rapira — возможно
-    wallet_snapshot балансов.
+  * скрин личного кабинета TapBank/Mercurio/Rapira — возможно
+    wallet_snapshot балансов;
+  * скрин СМС о входящем СБП-поступлении на Сбер-счёт — это НЕ
+    операция. `operations=[]`, в `chat_reply` коротко отметь
+    «вижу: +N ₽ от X на счёт Y, но такие поступления в учёт не
+    заношу — только общий остаток в /report».
 
-Верни `operations[]` как обычно. Если это нерелевантная картинка (мем,
-фото котика, селфи, и т.п.) — `chat_only=true`, `chat_reply` с лёгкой
-подъёбкой.
+Если фото — мем / селфи / нерелевантное — `chat_only=true`,
+`chat_reply` с лёгкой подъёбкой.
 """
 
 
@@ -75,6 +107,20 @@ async def on_photo(message: Message) -> None:
         return
     photos = message.photo or []
     if not photos:
+        return
+
+    # Gate: photo is analysed only when the user explicitly addresses
+    # the bot via caption. Otherwise the photo is just context —
+    # message_log persists it (caption included), and if the team
+    # triggers the bot later about it, recent_history has the reference.
+    caption = message.caption or ""
+    me = await message.bot.me()
+    if not await _caption_triggers_vision(caption, me.username):
+        log.info(
+            "photo_ignored_no_trigger",
+            user_id=message.from_user.id,
+            caption_preview=caption[:80],
+        )
         return
 
     # Largest size — last element.
@@ -93,7 +139,6 @@ async def on_photo(message: Message) -> None:
     img_bytes = buf.getvalue()
     img_b64 = base64.standard_b64encode(img_bytes).decode("ascii")
 
-    caption = message.caption or ""
     user_text_block = BATCH_INSTRUCTION + "\n\n" + _IMAGE_INSTRUCTION
     if caption:
         user_text_block += f"\n\nПодпись к фото: {caption}"
@@ -154,6 +199,22 @@ async def on_photo(message: Message) -> None:
         return
 
     for op in analysis.operations:
+        # Same dedup guardrail as batch_processor — avoid spamming
+        # multiple cards if Vision and a follow-up text trigger land on
+        # the same operation.
+        dup = await pending_ops.find_duplicate(
+            chat_id=message.chat.id,
+            intent=op.intent.value,
+            fields=op.fields,
+        )
+        if dup is not None:
+            log.info(
+                "photo_preview_deduped",
+                intent=op.intent.value,
+                existing_uid=dup.uid,
+            )
+            continue
+
         entry = await pending_ops.register(
             chat_id=message.chat.id,
             intent=op.intent.value,

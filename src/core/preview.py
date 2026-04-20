@@ -106,8 +106,10 @@ def render(intent: str, fields: dict[str, Any], summary: str) -> str:
             f"• Цена:    {_fmt_rub(fields.get('cost_rub'))}",
             f"• Против предоплаты: {fields.get('prepayment_ref') or 'нет'}",
         ]
+    elif intent_value == Intent.CABINET_IN_USE.value:
+        lines.append(f"• Кабинет: {fields.get('name_or_code')}  →  в работу (in_use)")
     elif intent_value == Intent.CABINET_WORKED_OUT.value:
-        lines.append(f"• Кабинет: {fields.get('name_or_code')}")
+        lines.append(f"• Кабинет: {fields.get('name_or_code')}  →  отработан")
     elif intent_value == Intent.CABINET_BLOCKED.value:
         lines.append(f"• Кабинет: {fields.get('name_or_code')}  →  blocked")
     elif intent_value == Intent.CABINET_RECOVERED.value:

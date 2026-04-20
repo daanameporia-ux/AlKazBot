@@ -12,7 +12,8 @@ class Intent(StrEnum):
     POA_WITHDRAWAL = "poa_withdrawal"
     EXCHANGE = "exchange"
     CABINET_PURCHASE = "cabinet_purchase"
-    CABINET_WORKED_OUT = "cabinet_worked_out"
+    CABINET_IN_USE = "cabinet_in_use"  # in_stock → in_use («в работу ставим»)
+    CABINET_WORKED_OUT = "cabinet_worked_out"  # in_use → worked_out («отработал / выебан»)
     CABINET_BLOCKED = "cabinet_blocked"
     CABINET_RECOVERED = "cabinet_recovered"  # blocked → recovered через нотариалку
     PREPAYMENT_GIVEN = "prepayment_given"

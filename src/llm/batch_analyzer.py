@@ -119,7 +119,8 @@ ANALYZE_TOOL = {
                                 "partner_deposit: {partner, amount_usdt}\n"
                                 "poa_withdrawal: {client_name, amount_rub, partner_shares:[{partner,pct}], client_share_pct}\n"
                                 "cabinet_purchase: {name?, cost_rub, prepayment_ref?}\n"
-                                "cabinet_worked_out: {name_or_code}\n"
+                                "cabinet_in_use: {name_or_code}  — «ставим в работу», in_stock→in_use\n"
+                                "cabinet_worked_out: {name_or_code}  — «отработал» / «выебан», in_use→worked_out\n"
                                 "cabinet_blocked: {name_or_code}\n"
                                 "prepayment_given: {supplier, amount_rub, expected_cabinets?}\n"
                                 "prepayment_fulfilled: {supplier, cabinets:[{name,cost_rub}]}\n"
@@ -252,8 +253,41 @@ BATCH_INSTRUCTION = """\
 - `280к на 3480 по 80.46` → EXCHANGE.
 - `отдал Мише 80 за четыре` → PREPAYMENT_GIVEN (supplier="Миша",
   amount_rub=80000, expected_cabinets=4).
+- `за весь этот шлак 261к суммарно заплатили` → PREPAYMENT_GIVEN
+  (supplier=поставщик из контекста, amount_rub=261000, expected_cabinets
+  из списка если есть). «Шлак» / «пачка» / «партия» = кучка кабинетов.
 - `эквайринг сегодня 5к` → EXPENSE category=acquiring.
+- `завтра в работу 4. Даут, 10. Анатолий` → 2× CABINET_IN_USE
+  (поштучно, в preview-карточки с именами).
 - `кабинет Серго отработан` → CABINET_WORKED_OUT.
+- `выебан кабинет Аляс` / `выебали Даута` → CABINET_WORKED_OUT
+  («выебан» на сленге команды = отработан, списан со склада).
+
+## Различие «в работу» vs «отработал» — ВАЖНО
+
+Это два разных статуса, и их легко спутать:
+
+  * **«Поставил/ставим в работу»** / «в работу сегодня» / «запускаю» →
+    `cabinet_in_use` (статус in_stock → in_use). Кабинет НАЧИНАЕТ цикл.
+  * **«Отработал»** / «выебан» / «выебали» / «списываем» →
+    `cabinet_worked_out` (статус in_use → worked_out). Кабинет
+    ЗАКОНЧИЛ цикл, списывается со склада.
+
+Если юзер говорит «кабинет X в работу» — НЕ ставь `cabinet_worked_out`.
+Это был живой баг: бот распарсил «завтра в работу Даут» как
+worked_out и юзер получил 2 неправильные preview-карточки.
+
+## Что НЕ операция — не плоди карточки
+
+  * **Входящие клиентские платежи на Сбер-счёт** (СБП от физика на
+    наш Сбер, переводы с карты клиента на наш кабинет) — это **не
+    отдельная операция**. Деньги капают на sber_balances, команда
+    учитывает их одной строкой в /report через wallet_snapshot.
+    Если юзер прислал скрин СМС с СБП-поступлением — в chat_reply
+    можешь кратко отметить факт, но `operations=[]`.
+  * **Скрины экранов, фото телефона с СМС, фото «банк напомнил
+    пароль» и т.п.** — не плодь preview. Только если юзер явно
+    попросил занести, действуй как с PDF-политикой.
 
 Даже без слов «запиши / внеси» — если батч про деньги/инвентарь и ты
 уверен (confidence ≥ 0.75), делай preview-карточку. Юзер нажмёт ✅/❌,
