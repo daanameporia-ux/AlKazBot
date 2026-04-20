@@ -25,6 +25,7 @@ class Intent(StrEnum):
     QUESTION = "question"
     FEEDBACK = "feedback"
     KNOWLEDGE_TEACH = "knowledge_teach"
+    WAKEWORD_ADD = "wakeword_add"  # "откликайся на X" / "зови меня X"
     CHAT = "chat"
     UNCLEAR = "unclear"
 

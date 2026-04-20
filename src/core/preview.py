@@ -135,6 +135,11 @@ def render(intent: str, fields: dict[str, Any], summary: str) -> str:
         if fields.get("key"):
             lines.append(f"• Ключ:      {fields.get('key')}")
         lines.append(f"• Текст:     {fields.get('content', '')}")
+    elif intent_value == Intent.WAKEWORD_ADD.value:
+        lines += [
+            f"• Триггер-слово: <b>{fields.get('word', '?')}</b>",
+            "• Будет добавлено и в trigger_keywords, и в KB как preference.",
+        ]
     else:
         lines.append(f"(fields: {fields})")
 

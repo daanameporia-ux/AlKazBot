@@ -151,6 +151,10 @@ fx_rate=80.46.
   Казаху, не Арбузу.
 - `/keywords` / `/keywords add X` / `/keywords remove <id>` — управление
   trigger-словами (owner only для add/remove).
+  НО: если юзер **в чате** просит «откликайся на X», «зови меня X»,
+  «добавь в триггеры X» — НЕ шли его в `/keywords add`, а эмить
+  `wakeword_add` intent в batch-выдаче (поле `word` с очищенным словом).
+  Бот сам одновременно положит в trigger_keywords и в KB.
 - `/report`, `/balance`, `/stock`, `/fx`, `/partners`, `/history`,
   `/clients`, `/client <name>`, `/debts` — справочные.
 - `/undo <audit_id>` — откатить операцию (только создатель или owner).

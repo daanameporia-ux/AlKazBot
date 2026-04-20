@@ -11,6 +11,7 @@ on confirm, so double-press is a no-op), and MUST write a row to
 
 from __future__ import annotations
 
+import re as _re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -479,10 +480,106 @@ async def apply(
             created_by_user_id=user_id,
         )
         await _audit(session, user_id, "create", "knowledge_base", fact.id, new=f)
+        # Fallback: if the preference obviously describes "respond to word X"
+        # and we didn't route through wakeword_add for some reason, mirror
+        # any extracted words into trigger_keywords so the wake-up isn't
+        # silently a no-op.
+        mirrored = await _mirror_wakewords_from_preference(session, fact)
         key_part = f" [{fact.key}]" if fact.key else ""
-        return f"✅ Запомнил #{fact.id} ({fact.category}){key_part}: {fact.content[:140]}"
+        mirrored_part = (
+            f"  (+trigger-слова: {', '.join(mirrored)})" if mirrored else ""
+        )
+        return (
+            f"✅ Запомнил #{fact.id} ({fact.category}){key_part}: "
+            f"{fact.content[:140]}{mirrored_part}"
+        )
+
+    if intent == Intent.WAKEWORD_ADD.value:
+        word = str(f.get("word") or "").strip().lower()
+        if len(word) < 3:
+            raise ApplyError(
+                f"Триггер-слово «{word}» слишком короткое (минимум 3 символа). "
+                "Давай развёрнутее — напиши какое слово добавить."
+            )
+        from src.core.keyword_match import invalidate as invalidate_kw_cache
+        from src.db.repositories import keywords as keyword_repo
+
+        kw_row = await keyword_repo.add(
+            session,
+            keyword=word,
+            created_by_user_id=user_id,
+            notes="добавлено через wakeword_add intent",
+        )
+        # Also persist as a preference so it shows up in `/knowledge`.
+        kb_fact = await kb_repo.add_fact(
+            session,
+            category="preference",
+            content=f"Откликаться на «{word}» наравне с остальными триггер-словами",
+            confidence="confirmed",
+            created_by_user_id=user_id,
+        )
+        await _audit(
+            session,
+            user_id,
+            "create",
+            "trigger_keywords",
+            kw_row.id,
+            new={"keyword": word, "source": "wakeword_add", "kb_fact_id": kb_fact.id},
+        )
+        await invalidate_kw_cache()
+        return f"✅ Буду откликаться на «{word}». Попробуй, скажи в чате."
 
     raise ApplyError(f"Intent {intent} пока не реализован на запись.")
+
+
+# --------------------------------------------------------------------------- #
+# Fallback: extract wake-words from a freshly-written preference fact.
+# Matches phrasings like "Откликаться на 'пёс' ...", "отвечать на слово шавка",
+# etc. Works off the normalised content so Claude-phrasing variance doesn't
+# break us.
+# --------------------------------------------------------------------------- #
+
+_WAKEWORD_TRIGGER = _re.compile(
+    r"(?:отклик[а-я]*|отзыв[а-я]*|реагир[а-я]*|зови[а-я]*|отвеч[а-я]*|обращ[а-я]*)"
+    r"\s+(?:на|меня|мне|когда)\s+"
+    r"[«\"'‘”]?([а-яёА-ЯЁ][а-яёА-ЯЁ\-]{2,24})[»\"'’”]?",
+    flags=_re.IGNORECASE,
+)
+
+
+async def _mirror_wakewords_from_preference(
+    session: AsyncSession, fact: Any
+) -> list[str]:
+    """If the preference fact reads like 'откликаться на X', push X into
+    trigger_keywords so the keyword-matcher actually picks it up. Returns
+    the list of words mirrored (may be empty)."""
+    if getattr(fact, "category", None) != "preference":
+        return []
+    content = getattr(fact, "content", "") or ""
+    matches = _WAKEWORD_TRIGGER.findall(content)
+    if not matches:
+        return []
+    from src.core.keyword_match import invalidate as invalidate_kw_cache
+    from src.db.repositories import keywords as keyword_repo
+
+    pushed: list[str] = []
+    for word in matches:
+        w = word.strip().lower()
+        if len(w) < 3:
+            continue
+        try:
+            await keyword_repo.add(
+                session,
+                keyword=w,
+                notes=f"mirrored from KB preference #{fact.id}",
+            )
+            pushed.append(w)
+        except ValueError:
+            # Too short or similar — skip silently.
+            continue
+    if pushed:
+        await invalidate_kw_cache()
+    return pushed
 
 
 async def _audit(
