@@ -37,6 +37,27 @@ def _is_whitelisted(user_id: int) -> bool:
     return user_id in settings.allowed_tg_user_ids
 
 
+async def _is_reply_to_bot(message: Message) -> bool:
+    """True if this voice message is a Telegram reply to one of the bot's
+    messages — classic reply_to_message OR Bot-API-7 external_reply.
+
+    We use this to force the analyzer to run even when the voice
+    transcript has no keyword hit. If a user hits "Reply" on the bot's
+    message and says something, that's as explicit an address as it gets.
+    """
+    me = await message.bot.me()
+    rpy = message.reply_to_message
+    if rpy is not None and rpy.from_user is not None and rpy.from_user.id == me.id:
+        return True
+    ext = getattr(message, "external_reply", None)
+    if ext is not None:
+        origin = getattr(ext, "origin", None)
+        sender = getattr(origin, "sender_user", None) if origin else None
+        if sender is not None and sender.id == me.id:
+            return True
+    return False
+
+
 @router.message(F.voice)
 async def on_voice(message: Message) -> None:
     if message.from_user is None or message.from_user.is_bot:
@@ -72,21 +93,30 @@ async def on_voice(message: Message) -> None:
             ogg_data=data,
         )
         voice_id = v.id
+
+    force_trigger = await _is_reply_to_bot(message)
+
     log.info(
         "voice_stored",
         voice_id=voice_id,
         duration=voice.duration,
         size=len(data),
         user=message.from_user.id,
+        reply_to_bot=force_trigger,
     )
 
     # Kick off background transcription + keyword check. Whisper runs
-    # locally, no Anthropic tokens. LLM only fires if a trigger keyword
-    # shows up in the transcript.
+    # locally, no Anthropic tokens. LLM fires when:
+    #   (a) a keyword hits the transcript, OR
+    #   (b) the voice was sent as a Reply-to-bot — the user explicitly
+    #       pressed Reply on our message, so it IS addressed regardless
+    #       of whether the voice text contains any wake-word.
     from src.core.voice_trigger import transcribe_and_keyword_check
 
     task = asyncio.create_task(
-        transcribe_and_keyword_check(message.bot, voice_id),
+        transcribe_and_keyword_check(
+            message.bot, voice_id, force_trigger=force_trigger
+        ),
         name=f"voice-kw-{voice_id}",
     )
     _pending_voice_tasks.add(task)

@@ -42,9 +42,15 @@ async def transcribe_only(voice_id: int) -> None:
         log.exception("voice_transcribe_failed", voice_id=voice_id)
 
 
-async def transcribe_and_keyword_check(bot: Bot, voice_id: int) -> None:
-    """Transcribe, then fire the analyzer ONLY if the transcript contains
-    a trigger keyword. Otherwise stays silent — no LLM call."""
+async def transcribe_and_keyword_check(
+    bot: Bot, voice_id: int, *, force_trigger: bool = False
+) -> None:
+    """Transcribe, then fire the analyzer if ANY of:
+      * transcript contains a trigger keyword, OR
+      * `force_trigger=True` (caller determined voice is a Reply-to-bot).
+
+    Otherwise stays silent — no LLM call.
+    """
     try:
         async with session_scope() as session:
             text = await transcribe_voice_row(session, voice_id)
@@ -56,11 +62,11 @@ async def transcribe_and_keyword_check(bot: Bot, voice_id: int) -> None:
         return
 
     hits = await find_hits(text)
-    if not hits:
+    if not hits and not force_trigger:
         log.info("voice_no_keyword_silent", voice_id=voice_id, text_preview=text[:100])
         return
 
-    # Keyword hit — fetch metadata for the trigger message.
+    # Keyword hit OR reply-to-bot — fetch metadata for the trigger message.
     async with session_scope() as session:
         res = await session.execute(
             select(VoiceMessage).where(VoiceMessage.id == voice_id)
@@ -72,10 +78,12 @@ async def transcribe_and_keyword_check(bot: Bot, voice_id: int) -> None:
         tg_user_id = v.tg_user_id
         tg_message_id = v.tg_message_id
 
+    trigger_kind = "voice_reply_to_bot" if (force_trigger and not hits) else "voice_keyword"
     log.info(
-        "voice_keyword_trigger",
+        "voice_trigger",
         voice_id=voice_id,
         hits=hits,
+        kind=trigger_kind,
         text_preview=text[:100],
     )
     trigger = BufferedMessage(
@@ -89,10 +97,10 @@ async def transcribe_and_keyword_check(bot: Bot, voice_id: int) -> None:
         chat_id=chat_id,
         messages=[],
         trigger=trigger,
-        trigger_kind="voice_keyword",
+        trigger_kind=trigger_kind,
     )
     flush = make_flush_handler(bot)
     try:
         await flush(batch)
     except Exception:
-        log.exception("voice_keyword_flush_failed", voice_id=voice_id)
+        log.exception("voice_flush_failed", voice_id=voice_id, kind=trigger_kind)

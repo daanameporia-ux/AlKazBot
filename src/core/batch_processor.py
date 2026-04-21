@@ -112,10 +112,22 @@ async def _maybe_send_sticker(
             preceding_text=None,
             sent_by_bot=True,
         )
+        # Explicit log format: distinguish a real description (Vision-
+        # generated, meaningful) from just-pack-fallback. If the bot
+        # glances at recent_history and sees only a pack name, it must
+        # know "i don't know what's on this sticker" rather than invent
+        # a description from the pack name alone.
+        if chosen.description:
+            sticker_marker = f"[sticker {chosen.emoji or '?'} · {chosen.description}]"
+        else:
+            pack = chosen.sticker_set or "?"
+            sticker_marker = (
+                f"[sticker {chosen.emoji or '?'} · pack={pack}, описания нет]"
+            )
         await log_bot_reply(
             chat_id=chat_id,
             tg_message_id=sent.message_id,
-            text=f"[sticker {chosen.emoji or '?'} · {chosen.description or chosen.sticker_set or ''}]"[:200],
+            text=sticker_marker[:220],
             intent_hint="sticker_reply",
         )
         log.info(

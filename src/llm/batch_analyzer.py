@@ -427,7 +427,7 @@ def _format_batch(batch: Batch) -> str:
     return "\n".join(parts) if parts else "(empty batch)"
 
 
-RECENT_HISTORY_WINDOW = 30
+RECENT_HISTORY_WINDOW = 80
 FEW_SHOT_PER_INTENT = 2
 FEW_SHOT_INTENTS = (
     Intent.POA_WITHDRAWAL,
