@@ -29,13 +29,15 @@ Output schema (tool input):
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from src.bot.batcher import Batch
-from src.db.models import MessageLog
+from src.db.models import MessageLog, VoiceMessage
 from src.db.repositories import few_shot as few_shot_repo
 from src.db.repositories import stickers as sticker_repo
 from src.db.session import session_scope
@@ -525,12 +527,77 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
     return "# Контекст чата (последние сообщения)\n" + "\n".join(lines)
 
 
+VOICE_TRANSCRIBE_CATCHUP_MIN = 10
+VOICE_TRANSCRIBE_CATCHUP_CAP = 10
+
+
+async def _ensure_recent_voices_transcribed(chat_id: int) -> int:
+    """Inline-transcribe any voice_messages in this chat from the last
+    `VOICE_TRANSCRIBE_CATCHUP_MIN` minutes that don't yet have a
+    transcript. Returns how many we kicked off.
+
+    Prevents the "прослушай предыдущие голосовые" race: when the user
+    fires voices then immediately triggers the bot, the background
+    transcribe tasks may still be running; without this the analyzer
+    sees empty placeholders and the bot answers "без транскрипций".
+
+    Capped at VOICE_TRANSCRIBE_CATCHUP_CAP per call to avoid turning a
+    single mention into a multi-minute Whisper marathon.
+    """
+    from sqlalchemy import select as _select
+
+    from src.core.voice_transcribe import transcribe_voice_row
+
+    cutoff = datetime.now(UTC) - timedelta(minutes=VOICE_TRANSCRIBE_CATCHUP_MIN)
+    async with session_scope() as session:
+        res = await session.execute(
+            _select(VoiceMessage.id)
+            .where(
+                VoiceMessage.chat_id == chat_id,
+                VoiceMessage.created_at >= cutoff,
+                VoiceMessage.transcribed_text.is_(None),
+                VoiceMessage.ogg_data.isnot(None),
+            )
+            .order_by(VoiceMessage.id.asc())
+            .limit(VOICE_TRANSCRIBE_CATCHUP_CAP)
+        )
+        pending_ids = [row[0] for row in res.all()]
+    if not pending_ids:
+        return 0
+
+    log.info("voice_catchup_start", chat_id=chat_id, count=len(pending_ids))
+
+    # Bounded parallelism — Whisper on CPU int8 can't effectively use
+    # more than ~2 parallel sessions without thrashing.
+    sem = asyncio.Semaphore(2)
+
+    async def _one(vid: int) -> None:
+        async with sem:
+            try:
+                async with session_scope() as session:
+                    await transcribe_voice_row(session, vid)
+            except Exception:
+                log.exception("voice_catchup_failed", voice_id=vid)
+
+    await asyncio.gather(*[_one(v) for v in pending_ids])
+    log.info("voice_catchup_done", chat_id=chat_id, count=len(pending_ids))
+    return len(pending_ids)
+
+
 async def analyze_batch(
     batch: Batch,
     *,
     knowledge_items: list[dict] | None = None,
 ) -> BatchAnalysis:
     rendered = _format_batch(batch)
+
+    # Before pulling recent history, drain any pending voice
+    # transcriptions for this chat — otherwise a user flurry of voices +
+    # immediate @-mention hits history before Whisper writes transcripts.
+    try:
+        await _ensure_recent_voices_transcribed(batch.chat_id)
+    except Exception:
+        log.exception("voice_catchup_outer_failed", chat_id=batch.chat_id)
 
     # Pull conversation history — everything except the messages that are
     # already inside `batch` (the analyzer would otherwise see them twice).
