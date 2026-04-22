@@ -55,12 +55,20 @@ class LLMResponse:
 
 _client: anthropic.AsyncAnthropic | None = None
 
+# Beta header needed for 1-hour cache TTL on cache_control blocks.
+# Without the header, Anthropic silently treats the ttl hint as default
+# 5-minute — we still work, just at regular cache cost.
+_CACHE_BETA = "extended-cache-ttl-2025-04-11"
+
 
 def get_client() -> anthropic.AsyncAnthropic:
     """Process-wide singleton — Anthropic SDK client is already thread-safe."""
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        _client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key,
+            default_headers={"anthropic-beta": _CACHE_BETA},
+        )
     return _client
 
 

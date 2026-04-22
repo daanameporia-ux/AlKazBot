@@ -200,6 +200,9 @@ async def described_catalog(
     Cap `per_pack` so the system-prompt block stays in cache-friendly
     territory. `pack_limit` bounds the total pack count.
     """
+    # Stable ordering (id ASC) — critical for prompt cache hit rate.
+    # Previously sorted by usage_count DESC which shifted on every bot
+    # sticker send, busting the cached sticker block on next request.
     res = await session.execute(
         select(
             SeenSticker.sticker_set,
@@ -213,7 +216,7 @@ async def described_catalog(
             SeenSticker.sticker_set.isnot(None),
             SeenSticker.description.isnot(None),
         )
-        .order_by(SeenSticker.usage_count.desc(), SeenSticker.id.asc())
+        .order_by(SeenSticker.id.asc())
     )
     by_pack: dict[str, list[tuple[str, str, str]]] = {}
     theme_of: dict[str, str | None] = {}

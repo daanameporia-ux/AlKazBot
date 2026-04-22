@@ -428,15 +428,19 @@ def _format_batch(batch: Batch) -> str:
 
 
 RECENT_HISTORY_WINDOW = 80
-FEW_SHOT_PER_INTENT = 2
+# Per-message char cap in recent_history — 250 is enough for voice
+# transcripts (usually 1-3 sentences) and short text ops. Longer
+# texts get truncated. Reducing from 500 → 250 ~halves the recent-
+# history token footprint when the chat is busy.
+RECENT_HISTORY_CHAR_CAP = 250
+# Few-shot: 1 example per intent across 5 core intents keeps the
+# block compact (~0.3k tokens) without hurting accuracy.
+FEW_SHOT_PER_INTENT = 1
 FEW_SHOT_INTENTS = (
     Intent.POA_WITHDRAWAL,
     Intent.EXCHANGE,
     Intent.EXPENSE,
     Intent.PARTNER_WITHDRAWAL,
-    Intent.PARTNER_DEPOSIT,
-    Intent.CABINET_PURCHASE,
-    Intent.CABINET_WORKED_OUT,
     Intent.WALLET_SNAPSHOT,
 )
 
@@ -461,20 +465,24 @@ async def _collect_few_shot() -> list[dict[str, Any]]:
 
 async def _collect_sticker_context() -> tuple[
     list[tuple[str, list[str]]],
-    list[tuple[str, list[tuple[str, str, str]]]],
+    list[tuple[str, str | None, list[tuple[str, str, str]]]],
     list[dict[str, Any]],
 ]:
     """Pull (pack_emoji_summary, described_catalog, usage_examples) for
     the Stickers system block. Each element may be empty; caller handles
     empty-safe rendering.
+
+    Sizes chosen for cache efficiency: shorter catalog = smaller cached
+    block = smaller cache-write cost. Usage examples go into uncached
+    block so they don't bust the cache on every sticker send.
     """
     async with session_scope() as session:
-        packs = await sticker_repo.pack_emoji_summary(session, pack_limit=10)
+        packs = await sticker_repo.pack_emoji_summary(session, pack_limit=8)
         catalog = await sticker_repo.described_catalog(
-            session, per_pack=20, pack_limit=10
+            session, per_pack=12, pack_limit=6
         )
         rows = await sticker_repo.recent_usage_examples(
-            session, limit=10, humans_only=True
+            session, limit=8, humans_only=True
         )
     examples = [
         {
@@ -513,7 +521,7 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
         if not r.text:
             continue
         who = "бот" if r.is_bot else (str(r.tg_user_id) if r.tg_user_id else "?")
-        text = r.text[:500]
+        text = r.text[:RECENT_HISTORY_CHAR_CAP]
         if r.intent_detected == "voice_transcript" and text.startswith("[voice]"):
             # Strip the [voice] prefix and make the origin explicit.
             stripped = text.removeprefix("[voice]").strip()
@@ -657,13 +665,22 @@ async def analyze_batch(
         log.warning("batch_analyzer_validation_failed", error=str(e))
         return BatchAnalysis(operations=[], chat_only=True)
 
+    # Cache-efficiency observability — track hit/write ratio so we can
+    # spot regressions in the prompt-caching pipeline early.
+    cache_write = resp.cache_creation_input_tokens or 0
+    cache_read = resp.cache_read_input_tokens or 0
+    fresh_input = resp.input_tokens or 0
+    total_in = cache_write + cache_read + fresh_input
+    hit_ratio = (cache_read / total_in * 100.0) if total_in else 0.0
     log.info(
         "batch_analyzer_result",
         size=len(batch.messages),
         n_ops=len(result.operations),
         chat_only=result.chat_only,
-        cached_tokens=resp.cache_read_input_tokens,
-        input_tokens=resp.input_tokens,
+        cache_write_tokens=cache_write,
+        cache_read_tokens=cache_read,
+        input_tokens=fresh_input,
         output_tokens=resp.output_tokens,
+        cache_hit_ratio_pct=round(hit_ratio, 1),
     )
     return result

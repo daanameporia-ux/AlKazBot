@@ -393,28 +393,22 @@ def render_few_shot(
     return "\n".join(parts)
 
 
-def render_sticker_context(
+def render_sticker_library(
     *,
     pack_emojis: list[tuple[str, list[str]]] | None = None,
     described_catalog: list[tuple[str, str | None, list[tuple[str, str, str]]]] | None = None,
-    usage_examples: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render the Stickers section for the system prompt.
+    """Static, cache-friendly part of the sticker block.
 
-    Three optional data sources are merged into one block:
+    Renders ONLY the emoji spectrum + described catalog, both of which
+    have stable sort order (emoji spectrum: ranked by pack size;
+    catalog: id ASC). These don't change per request so the block
+    stays cacheable across many calls.
 
-    * `pack_emojis`        — `[(pack_name, [emoji1, emoji2, ...]), ...]`
-                             — fast emoji-spectrum glance (includes packs
-                             with no descriptions too).
-    * `described_catalog`  — `[(pack_name, [(emoji, description, fuid),
-                             ...]), ...]`. The meat: sticker-by-sticker
-                             vision captions so Claude picks by meaning,
-                             not just emoji label.
-    * `usage_examples`     — `[{who, emoji, pack, preceding_text}, ...]`
-                             real recent sends from team members with
-                             the context that preceded each.
+    The mutable «живые примеры» (recent usage) live in `render_sticker_usage`
+    and go into the UNcached recent-context block instead.
     """
-    if not pack_emojis and not described_catalog and not usage_examples:
+    if not pack_emojis and not described_catalog:
         return (
             "# Стикеры\n"
             "(библиотека пустая — команда ещё не присылала стикеров. "
@@ -451,20 +445,47 @@ def render_sticker_context(
             sample = " ".join(emojis[:18])
             more = f" +{len(emojis) - 18}" if len(emojis) > 18 else ""
             parts.append(f"- `{pack}` — {sample}{more}")
-    if usage_examples:
-        parts.append(
-            "\n## Живые примеры (кто и когда отправлял, какой контекст):"
-        )
-        for ex in usage_examples[:10]:
-            who = ex.get("who") or "?"
-            emoji = ex.get("emoji") or "?"
-            ctx = (ex.get("preceding_text") or "").strip()
-            if ctx:
-                ctx_short = ctx[:220]
-                parts.append(f"- {who} отправил {emoji} после: «{ctx_short}»")
-            else:
-                parts.append(f"- {who} отправил {emoji} (без контекста в логе)")
     return "\n".join(parts)
+
+
+def render_sticker_usage(
+    usage_examples: list[dict[str, Any]] | None = None,
+) -> str:
+    """Mutable part of the sticker block — recent team sends with
+    surrounding context. Goes into the UNcached recent-context block
+    because it rotates on every sticker send."""
+    if not usage_examples:
+        return ""
+    parts = [
+        "# Живые примеры стикеров (кто и когда отправлял, какой контекст):"
+    ]
+    for ex in usage_examples[:10]:
+        who = ex.get("who") or "?"
+        emoji = ex.get("emoji") or "?"
+        ctx = (ex.get("preceding_text") or "").strip()
+        if ctx:
+            ctx_short = ctx[:220]
+            parts.append(f"- {who} отправил {emoji} после: «{ctx_short}»")
+        else:
+            parts.append(f"- {who} отправил {emoji} (без контекста в логе)")
+    return "\n".join(parts)
+
+
+# Keep the old name as a back-compat wrapper in case anything imports it.
+def render_sticker_context(
+    *,
+    pack_emojis: list[tuple[str, list[str]]] | None = None,
+    described_catalog: list[tuple[str, str | None, list[tuple[str, str, str]]]] | None = None,
+    usage_examples: list[dict[str, Any]] | None = None,
+) -> str:
+    """DEPRECATED — kept so external callers don't break during the
+    split. New code should use render_sticker_library +
+    render_sticker_usage separately."""
+    lib = render_sticker_library(
+        pack_emojis=pack_emojis, described_catalog=described_catalog
+    )
+    usage = render_sticker_usage(usage_examples)
+    return lib + (("\n\n" + usage) if usage else "")
 
 
 def build_system_blocks(
@@ -473,39 +494,63 @@ def build_system_blocks(
     few_shot_examples: list[dict[str, Any]] | None = None,
     sticker_pack_emojis: list[tuple[str, list[str]]] | None = None,
     sticker_described_catalog: list[
-        tuple[str, list[tuple[str, str, str]]]
+        tuple[str, str | None, list[tuple[str, str, str]]]
     ] | None = None,
     sticker_usage_examples: list[dict[str, Any]] | None = None,
     recent_messages: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the `system=` argument for `anthropic.messages.create`."""
+    """Return the `system=` argument for `anthropic.messages.create`.
+
+    Layout (optimised for prompt-caching hit rate):
+
+      [0] CORE_INSTRUCTIONS        — cached, 1h TTL (rarely changes)
+      [1] KB                       — cached, 1h TTL (changes on teach)
+      [2] FEW_SHOT                 — cached, 1h TTL (changes on ✅)
+      [3] STICKER_LIBRARY          — cached, 5m TTL (new stickers arrive)
+      [4] RECENT + sticker usage   — NOT cached (rotates every call)
+
+    Anthropic allows up to 4 cache_control breakpoints; we use exactly
+    4. Sticker usage examples (which used to bust the sticker block
+    cache on every bot sticker send) are now merged into the uncached
+    recent block.
+    """
+    # 1h TTL requires the `extended-cache-ttl-2025-04-11` beta header on
+    # the request. If the SDK version doesn't support it, Anthropic just
+    # treats it as regular ephemeral (5m) — safe fallback.
+    LONG_TTL = {"type": "ephemeral", "ttl": "1h"}
+    SHORT_TTL = {"type": "ephemeral"}  # default 5m
+
     blocks: list[dict[str, Any]] = [
         {
             "type": "text",
             "text": CORE_INSTRUCTIONS,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": LONG_TTL,
         },
         {
             "type": "text",
             "text": render_knowledge_base(knowledge_items),
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": LONG_TTL,
         },
         {
             "type": "text",
             "text": render_few_shot(few_shot_examples),
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": LONG_TTL,
         },
         {
             "type": "text",
-            "text": render_sticker_context(
+            "text": render_sticker_library(
                 pack_emojis=sticker_pack_emojis,
                 described_catalog=sticker_described_catalog,
-                usage_examples=sticker_usage_examples,
             ),
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": SHORT_TTL,
         },
     ]
+    # Build the uncached tail: sticker usage examples + recent chat.
+    tail_parts: list[str] = []
+    if sticker_usage_examples:
+        tail_parts.append(render_sticker_usage(sticker_usage_examples))
     if recent_messages:
-        # NOT cached — changes every call.
-        blocks.append({"type": "text", "text": f"# Recent chat\n{recent_messages}"})
+        tail_parts.append(recent_messages)
+    if tail_parts:
+        blocks.append({"type": "text", "text": "\n\n".join(tail_parts)})
     return blocks
