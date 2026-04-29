@@ -508,6 +508,154 @@ async def apply(
             f"{fact.content[:140]}{mirrored_part}"
         )
 
+    if intent == Intent.CLIENT_BALANCE.value:
+        # Snapshot current balance for a POA-client. Stored in
+        # `client_balance_history` (timestamped) + a short summary in
+        # `clients.notes` so the latest is easy to read out.
+        client_name = str(f.get("client_name") or "").strip()
+        if not client_name:
+            raise ApplyError("client_name пустой")
+        amount_rub_dec = _dec(f.get("amount_rub"))
+        if amount_rub_dec is None:
+            amount_rub_dec = Decimal("0")
+        source = str(f.get("source") or "unknown").strip().lower() or "unknown"
+        description = str(f.get("description") or "").strip() or None
+
+        # Get-or-create client (POA-client)
+        client = await client_repo.get_by_name(session, client_name)
+        if client is None:
+            from src.db.models import Client
+
+            client = Client(
+                name=client_name,
+                notes=f"Создан автоматически при записи баланса {amount_rub_dec}₽ ({source}).",
+            )
+            session.add(client)
+            await session.flush()
+
+        # Insert history row (table created by migration `0017_client_balance_history`)
+        from sqlalchemy import text as sa_text
+
+        await session.execute(
+            sa_text(
+                "INSERT INTO client_balance_history "
+                "(client_id, amount_rub, source, description, created_by_user_id, created_at) "
+                "VALUES (:cid, :amt, :src, :descr, :uid, now())"
+            ),
+            {
+                "cid": client.id,
+                "amt": amount_rub_dec,
+                "src": source,
+                "descr": description,
+                "uid": user_id,
+            },
+        )
+
+        # Update human-readable summary in clients.notes (append, don't clobber prior intel)
+        from datetime import datetime as _dt
+
+        today = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
+        if amount_rub_dec == 0 and description:
+            balance_str = f"{description}"
+        elif amount_rub_dec == 0:
+            balance_str = "0₽ (пусто)"
+        else:
+            balance_str = f"{amount_rub_dec:,.0f}₽".replace(",", " ")
+        summary_line = f"\n[{today}] Баланс {balance_str} ({source})."
+        # Cap notes to ~3000 chars so it doesn't grow forever
+        new_notes = ((client.notes or "") + summary_line)[-3000:]
+        from sqlalchemy import text as _sa_text2
+
+        await session.execute(
+            _sa_text2("UPDATE clients SET notes=:n WHERE id=:cid"),
+            {"n": new_notes, "cid": client.id},
+        )
+
+        await _audit(
+            session,
+            user_id,
+            "create",
+            "client_balance_history",
+            client.id,
+            new={
+                "client": client_name,
+                "amount_rub": str(amount_rub_dec),
+                "source": source,
+                "description": description,
+            },
+        )
+
+        if amount_rub_dec == 0 and description:
+            return f"✅ {client_name}: {description}."
+        if amount_rub_dec == 0:
+            return f"✅ {client_name}: пусто (0₽). Записал."
+        return f"✅ {client_name}: баланс {balance_str}. Записал."
+
+    if intent == Intent.WALLET_SNAPSHOT.value:
+        # Persist a wallet snapshot. Each known wallet code is an optional
+        # numeric field on `fields`. RUB wallets carry RUB native amount;
+        # we convert via the latest fx rate.
+        from datetime import datetime as _dt
+
+        from src.db.repositories import snapshots as snap_repo
+
+        wallets_codes = (
+            "tapbank",
+            "mercurio",
+            "rapira",
+            "sber_balances",
+            "cash",
+        )
+        fx_rate: Decimal | None = None
+        any_rub = any(
+            f.get(code) is not None for code in ("sber_balances", "cash")
+        )
+        if any_rub:
+            fx_rate = await _resolve_fx(session, _dec(f.get("fx_rate")))
+
+        written: list[str] = []
+        skipped: list[str] = []
+        for code in wallets_codes:
+            raw = f.get(code)
+            if raw is None or raw == "":
+                continue
+            wallet = await wallet_repo.get_by_code(session, code)
+            if wallet is None:
+                skipped.append(f"{code} (нет в БД)")
+                continue
+            if wallet.currency == "USDT":
+                amount_usdt = _req_dec(raw, code)
+                amount_native = amount_usdt
+                this_fx = None
+            else:
+                amount_native = _req_dec(raw, code)
+                this_fx = fx_rate
+                amount_usdt = amount_native / this_fx
+            await snap_repo.create(
+                session,
+                wallet=wallet,
+                amount_native=amount_native,
+                amount_usdt=amount_usdt,
+                fx_rate=this_fx,
+            )
+            written.append(f"{code}={amount_native}{wallet.currency.lower()}")
+        if not written:
+            raise ApplyError(
+                "Ни одного баланса не передано в wallet_snapshot — нечего писать."
+            )
+        await _audit(
+            session,
+            user_id,
+            "create",
+            "wallet_snapshots",
+            0,
+            new={"written": written, "skipped": skipped},
+        )
+        skipped_part = (
+            f"  (пропущены: {', '.join(skipped)})" if skipped else ""
+        )
+        return f"✅ Снапшот балансов: {', '.join(written)}.{skipped_part}"
+
     if intent == Intent.WAKEWORD_ADD.value:
         word = str(f.get("word") or "").strip().lower()
         if len(word) < 3:

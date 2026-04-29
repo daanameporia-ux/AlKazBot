@@ -1,11 +1,17 @@
 """Pure net-profit calculation — split out for unit-testability.
 
-The full /report generator in `src/core/reports.py` talks to the DB;
-this file owns just the arithmetic so we can unit-test the exact
-formula from sber26-bot-SPEC.md §"Отчёт/Формула прибыли":
+Updated 2026-04-29 per owner instruction:
+  • Prepayments are NO LONGER added to assets — they were double-counting
+    against cabinets spawned by the same prepayment. Now they're a
+    reference line only, rendered by reports.py separately.
+  • Material valuation handles доверка-presence: cabinets without доверка
+    are valued at the prepayment-remainder average; that calc happens in
+    reports.py and arrives here as a ready `total_material`.
+
+Net-profit identity (assets-liabilities-equity = profit):
 
     Net Profit = Total Wallets
-               + Total Assets (material + prepayments)
+               + Total Material (cabinets at effective cost)
                − Total Liabilities (client debts)
                − Σ partner_initial_deposits
                − Σ partner_poa_contributions
@@ -22,7 +28,7 @@ from decimal import Decimal
 class ReportInputs:
     total_wallets: Decimal
     total_material: Decimal
-    total_prepayments: Decimal
+    total_prepayments: Decimal  # reference only — not in profit math
     total_debts: Decimal
     partner_initial_depo: Decimal
     partner_poa_share: Decimal
@@ -37,7 +43,9 @@ class ReportTotals:
 
 
 def compute(inputs: ReportInputs) -> ReportTotals:
-    total_assets = inputs.total_material + inputs.total_prepayments
+    # Assets = wallets + material. Prepayments excluded (they're already
+    # represented by the cabinets they bought; double-count avoided).
+    total_assets = inputs.total_material
     total_liabilities = inputs.total_debts
     net_profit = (
         inputs.total_wallets

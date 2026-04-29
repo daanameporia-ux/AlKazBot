@@ -23,6 +23,7 @@ class Intent(StrEnum):
     PARTNER_DEPOSIT = "partner_deposit"
     CLIENT_PAYOUT = "client_payout"
     WALLET_SNAPSHOT = "wallet_snapshot"
+    CLIENT_BALANCE = "client_balance"  # «Аймурат 62к карта» — отчёт о балансе POA-клиента, НЕ снятие
     QUESTION = "question"
     FEEDBACK = "feedback"
     KNOWLEDGE_TEACH = "knowledge_teach"

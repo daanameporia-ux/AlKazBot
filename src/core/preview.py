@@ -89,6 +89,25 @@ def render(intent: str, fields: dict[str, Any], summary: str) -> str:
         for w in wallets:
             if w in fields:
                 lines.append(f"• {w:<14} = {fields[w]}")
+    elif intent_value == Intent.CLIENT_BALANCE.value:
+        amount = fields.get("amount_rub")
+        try:
+            amt_dec = Decimal(str(amount)) if amount not in (None, "") else None
+        except (InvalidOperation, ValueError):
+            amt_dec = None
+        if amt_dec is None or amt_dec == 0:
+            descr = fields.get("description") or "пусто (0₽)"
+            balance_str = str(descr)
+        else:
+            balance_str = _fmt_rub(amt_dec)
+        src = fields.get("source") or "unknown"
+        lines += [
+            f"• Клиент:   {fields.get('client_name')}",
+            f"• Баланс:   {balance_str}",
+            f"• Источник: {src}",
+        ]
+        if fields.get("description") and amt_dec not in (None, Decimal("0")):
+            lines.append(f"• Заметка:  {fields['description']}")
     elif intent_value == Intent.POA_WITHDRAWAL.value:
         lines += [
             f"• Клиент:        {fields.get('client_name')}",

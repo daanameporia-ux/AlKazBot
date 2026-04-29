@@ -174,6 +174,7 @@ class Cabinet(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="in_stock")
     in_use_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     worked_out_date: Mapped[date | None] = mapped_column(Date)
+    has_doverka: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -212,6 +213,38 @@ class PoAWithdrawal(Base):
     withdrawal_date: Mapped[date] = mapped_column(Date, nullable=False)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     notes: Mapped[str | None] = mapped_column(Text)
+
+
+class ClientBalanceHistory(Base):
+    """Snapshot of POA-client's account balance.
+
+    Captured when команда speaks just balances during a POA-walkaround
+    («Аймурат 62к карта», «Войтик пусто», «Х ненаход»). Lets us answer
+    «какой у X баланс?» later. NOT a withdrawal — those are in
+    `poa_withdrawals` and need explicit verb.
+    """
+
+    __tablename__ = "client_balance_history"
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('card','sber_account','unknown','cash','other')",
+            name="ck_client_balance_history_source",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
+    description: Mapped[str | None] = mapped_column(Text)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -571,6 +604,7 @@ __all__ = [
     "Base",
     "Cabinet",
     "Client",
+    "ClientBalanceHistory",
     "Exchange",
     "Expense",
     "Feedback",

@@ -88,30 +88,130 @@ async def generate(session: AsyncSession, *, created_by_user_id: int | None = No
         )
 
     # --- Cabinets on the shelf ---
+    # Material valuation rule (per owner, 2026-04-29):
+    #   • с доверкой готов к работе → cost_rub at face value (28k typical)
+    #   • без доверки на складе → average price from prepayment remainder
+    #     (prepayment_rub − Σ(linked cabinets with worked_out / blocked / recovered) − Σ(linked cabinets in_stock with доверка))
+    #     / count(linked cabinets in_stock without доверка)
+    # All in-store statuses (in_stock + in_use + blocked + recovered) count
+    # towards "live material" — only worked_out is consumed.
+    LIVE_STATUSES = ("in_stock", "in_use", "blocked", "recovered")
     res = await session.execute(
-        select(Cabinet).where(Cabinet.status.in_(("in_stock", "in_use", "blocked")))
+        select(Cabinet).where(Cabinet.status.in_(LIVE_STATUSES))
         .order_by(Cabinet.id)
     )
     cabs = list(res.scalars().all())
-    total_material = sum((Decimal(c.cost_usdt) for c in cabs), Decimal("0"))
-    cab_lines = [
-        f"  {(c.name or c.auto_code):<14} {_fmt_usdt(Decimal(c.cost_usdt))}"
-        for c in cabs
-    ]
 
-    # --- Prepayments (open) ---
+    # Determine effective cost per cabinet (handle no-доверка via prepayment average)
+    # Group cabinets without доверка by prepayment_id so each pack gets its own avg.
+    no_doverka_by_prep: dict[int | None, list[Cabinet]] = {}
+    with_doverka_by_prep: dict[int | None, list[Cabinet]] = {}
+    for c_ in cabs:
+        target = no_doverka_by_prep if not c_.has_doverka else with_doverka_by_prep
+        target.setdefault(c_.prepayment_id, []).append(c_)
+
+    # Look up linked prepayment info — for each prepayment id, what's been
+    # consumed (worked_out) and what we still owe.
+    prepayment_lookup: dict[int, dict[str, Decimal]] = {}
+    if no_doverka_by_prep:
+        prep_ids = [pid for pid in no_doverka_by_prep if pid is not None]
+        if prep_ids:
+
+            preps_res = await session.execute(
+                select(Prepayment).where(Prepayment.id.in_(prep_ids))
+            )
+            for p in preps_res.scalars().all():
+                # All cabinets linked to this prepayment regardless of status
+                all_linked_res = await session.execute(
+                    select(Cabinet).where(Cabinet.prepayment_id == p.id)
+                )
+                all_linked = list(all_linked_res.scalars().all())
+                spent_rub = sum(
+                    (Decimal(x.cost_rub) for x in all_linked if x.status == "worked_out"),
+                    Decimal("0"),
+                )
+                with_doverka_rub = sum(
+                    (
+                        Decimal(x.cost_rub)
+                        for x in all_linked
+                        if x.has_doverka and x.status in LIVE_STATUSES
+                    ),
+                    Decimal("0"),
+                )
+                no_doverka_count = sum(
+                    1
+                    for x in all_linked
+                    if (not x.has_doverka) and x.status in LIVE_STATUSES
+                )
+                remaining_rub = Decimal(p.amount_rub) - spent_rub - with_doverka_rub
+                avg_no_doverka_rub = (
+                    (remaining_rub / no_doverka_count) if no_doverka_count > 0 else Decimal("0")
+                )
+                prepayment_lookup[p.id] = {
+                    "amount_rub": Decimal(p.amount_rub),
+                    "amount_usdt": Decimal(p.amount_usdt),
+                    "fx_rate": Decimal(p.fx_rate),
+                    "spent_rub": spent_rub,
+                    "with_doverka_rub": with_doverka_rub,
+                    "remaining_rub": remaining_rub,
+                    "avg_no_doverka_rub": avg_no_doverka_rub,
+                    "supplier": p.supplier or "",
+                    "status": p.status,
+                }
+
+    def _effective_cost_usdt(c_: Cabinet) -> Decimal:
+        if c_.has_doverka:
+            return Decimal(c_.cost_usdt)
+        # No-доверка: use prepayment average if available
+        info = prepayment_lookup.get(c_.prepayment_id) if c_.prepayment_id else None
+        if info and info["avg_no_doverka_rub"] > 0:
+            fx = info["fx_rate"] or Decimal(c_.fx_rate)
+            return info["avg_no_doverka_rub"] / fx
+        return Decimal(c_.cost_usdt)
+
+    total_material = Decimal("0")
+    cab_lines: list[str] = []
+    for c_ in cabs:
+        eff = _effective_cost_usdt(c_)
+        total_material += eff
+        marker = ""
+        if not c_.has_doverka:
+            marker = " (без доверки)"
+        elif c_.status == "blocked":
+            marker = " (blocked)"
+        elif c_.status == "recovered":
+            marker = " (recovered)"
+        cab_lines.append(
+            f"  {(c_.name or c_.auto_code):<24} {_fmt_usdt(eff)}{marker}"
+        )
+
+    # --- Prepayments — REFERENCE ONLY (NOT in assets total).
+    # Owner instruction (2026-04-29): «нужно для справочной информации в
+    # каждом отчёте держать сколько предоплаты уже внесено… когда партия
+    # будет завершена, она будет закрыта». So prepayments don't double-
+    # count vs cabinets they spawned — they show what we paid total and
+    # what's still in transit.
     res = await session.execute(
         select(Prepayment).where(Prepayment.status.in_(("pending", "partial")))
     )
     preps = list(res.scalars().all())
-    total_prepayments = sum(
-        (Decimal(p.amount_usdt) for p in preps), Decimal("0")
-    )
-    prep_lines = [
-        f"  Предоплата {_fmt_rub(Decimal(p.amount_rub))} = {_fmt_usdt(Decimal(p.amount_usdt))}"
-        + (f" ({p.supplier})" if p.supplier else "")
-        for p in preps
-    ]
+    # NOT added to assets. We render lines only.
+    total_prepayments = Decimal("0")
+    prep_lines: list[str] = []
+    for p in preps:
+        info = prepayment_lookup.get(p.id) if p.id in prepayment_lookup else None
+        if info:
+            extra = (
+                f" — внесено {_fmt_rub(info['amount_rub'])}, "
+                f"отработано {_fmt_rub(info['spent_rub'])}, "
+                f"в материале с доверкой {_fmt_rub(info['with_doverka_rub'])}, "
+                f"остаток для no-доверки {_fmt_rub(info['remaining_rub'])}"
+            )
+        else:
+            extra = f" — внесено {_fmt_rub(Decimal(p.amount_rub))}"
+        prep_lines.append(
+            f"  Партия {p.supplier or '?'}: {p.status}{extra}"
+        )
 
     # --- Client debts (unpaid POA shares) ---
     res = await session.execute(
@@ -183,9 +283,35 @@ async def generate(session: AsyncSession, *, created_by_user_id: int | None = No
         parts.extend(cab_lines)
     else:
         parts.append("  (склад пустой)")
+    # Worked-out cabinets since last report
+    res = await session.execute(
+        select(Cabinet).where(Cabinet.status == "worked_out").order_by(Cabinet.id)
+    )
+    if since_dt is not None:
+        # Already filtered above for cabinets_worked_list; rebuild the
+        # USDT line using the actual cost values.
+        worked_total = Decimal("0")
+        worked_lines: list[str] = []
+        for n, code in worked_rows:
+            row = await session.execute(
+                select(Cabinet).where(
+                    (Cabinet.name == n) | (Cabinet.auto_code == code)
+                ).limit(1)
+            )
+            cab = row.scalar_one_or_none()
+            if cab is not None:
+                worked_total += Decimal(cab.cost_usdt)
+                worked_lines.append(
+                    f"  {(cab.name or cab.auto_code):<24} {_fmt_usdt(Decimal(cab.cost_usdt))}"
+                )
+        if worked_lines:
+            parts.append(
+                f"\n<b>Отработано с прошлого отчёта:</b> {_fmt_usdt(worked_total)}"
+            )
+            parts.extend(worked_lines)
     if prep_lines:
         parts.append(
-            f"\n<b>Предоплаты:</b> {_fmt_usdt(total_prepayments)}"
+            "\n<b>Предоплаты (справочно, не в активах):</b>"
         )
         parts.extend(prep_lines)
     if debt_lines:

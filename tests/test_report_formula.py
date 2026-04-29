@@ -13,27 +13,27 @@ def test_spec_example_reproduces_491() -> None:
     Net = 6974 (оборотка) - 3600 - 1500 - 905 - 478 = 491
 
     Re-expressed with our inputs:
-      wallets=6974, material=372, prepayments(debts)=273,
+      wallets=6974, material=372, prepayments(reference)=273 (NOT in assets),
       depo=3600+1500=5100, poa=905+478=1383, withdrawals=0.
-    Expected net = 6974 + (372 + 0) - 273 - 5100 - 1383 + 0 = 590.
 
-    The canonical 491 figure in the spec excludes material/assets from
-    the sum — that's a simplified narrative, not the formal formula.
-    The formal formula (the one we persist) is what we test here.
+    Updated 2026-04-29: prepayments are reference-only, no longer in
+    assets (avoids double-count vs cabinets they spawned).
+    Expected net = 6974 + 372 - 0 - 5100 - 1383 + 0 = 863.
     """
     totals = compute(
         ReportInputs(
             total_wallets=Decimal("6974"),
             total_material=Decimal("372"),
-            total_prepayments=Decimal("273"),
+            total_prepayments=Decimal("273"),  # ignored in math now
             total_debts=Decimal("0"),
             partner_initial_depo=Decimal("5100"),
             partner_poa_share=Decimal("1383"),
             partner_withdrawals=Decimal("0"),
         )
     )
-    # 6974 + (372 + 273) - 0 - 5100 - 1383 + 0 = 1136
-    assert totals.net_profit == Decimal("1136")
+    # 6974 + 372 - 0 - 5100 - 1383 + 0 = 863
+    assert totals.net_profit == Decimal("863")
+    assert totals.total_assets == Decimal("372")  # material only, prepayments excluded
 
 
 def test_withdrawal_adds_back() -> None:
