@@ -55,6 +55,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="fx", description="Текущий курс RUB→USDT"),
     BotCommand(command="partners", description="Доли партнёров"),
     BotCommand(command="clients", description="Список клиентов"),
+    BotCommand(command="balances", description="Балансы POA-клиентов"),
     BotCommand(command="client", description="История по клиенту"),
     BotCommand(command="debts", description="Открытые долги"),
     BotCommand(command="history", description="Последние операции"),

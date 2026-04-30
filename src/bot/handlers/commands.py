@@ -407,6 +407,105 @@ async def cmd_clients(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+@router.message(Command("balances"))
+async def cmd_balances(message: Message, command: CommandObject) -> None:
+    """Show latest balance per POA-client from `client_balance_history`.
+
+    No args → all clients with their latest balance snapshot.
+    With name → full history for that client.
+    """
+    from sqlalchemy import text as sa_text
+
+    name_arg = (command.args or "").strip()
+
+    async with session_scope() as session:
+        if name_arg:
+            res = await session.execute(
+                sa_text(
+                    """
+                    SELECT c.name,
+                           h.amount_rub, h.source, h.description, h.created_at
+                    FROM clients c
+                    JOIN client_balance_history h ON h.client_id = c.id
+                    WHERE c.name ILIKE :name
+                    ORDER BY h.created_at DESC
+                    LIMIT 50
+                    """
+                ),
+                {"name": f"%{name_arg}%"},
+            )
+            rows = list(res.all())
+            if not rows:
+                await message.reply(f"По «{name_arg}» истории балансов нет.")
+                return
+            lines = [f"<b>История балансов «{rows[0][0]}»:</b>"]
+            for _nm, amt, src, descr, ts in rows:
+                ts_str = ts.strftime("%d.%m %H:%M")
+                if descr and (amt is None or amt == 0):
+                    val = descr
+                elif amt == 0:
+                    val = "пусто"
+                else:
+                    val = f"{amt:,.0f}₽".replace(",", " ")
+                src_part = f" ({src})" if src and src != "unknown" else ""
+                descr_part = f" — {descr}" if descr and amt and amt != 0 else ""
+                lines.append(f"  {ts_str}: {val}{src_part}{descr_part}")
+            await message.answer("\n".join(lines))
+            return
+
+        # All clients — latest balance per client
+        res = await session.execute(
+            sa_text(
+                """
+                SELECT c.id, c.name,
+                       (SELECT amount_rub  FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS bal,
+                       (SELECT source      FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS src,
+                       (SELECT description FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS descr,
+                       (SELECT created_at  FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS ts
+                FROM clients c
+                ORDER BY c.id
+                """
+            )
+        )
+        rows = list(res.all())
+    if not rows:
+        await message.answer("Клиентов нет.")
+        return
+
+    lines = ["<b>Балансы POA-клиентов (последние снятия):</b>"]
+    total_active = 0
+    for _cid, nm, bal, src, descr, ts in rows:
+        if ts is None:
+            lines.append(f"  • <b>{nm}</b> — баланс не проверяли")
+            continue
+        ts_str = ts.strftime("%d.%m")
+        if descr and (bal is None or bal == 0):
+            val = f"<i>{descr}</i>"
+        elif bal == 0:
+            val = "<i>пусто</i>"
+        else:
+            v = f"{bal:,.0f}₽".replace(",", " ")
+            val = f"<b>{v}</b>"
+            import contextlib
+            with contextlib.suppress(TypeError, ValueError):
+                total_active += int(bal or 0)
+        src_part = ""
+        if src and src not in ("unknown", None):
+            src_part = f" [{src}]"
+        descr_part = ""
+        if descr and bal and bal != 0:
+            descr_part = f" — {descr}"
+        lines.append(f"  • <b>{nm}</b>: {val}{src_part}{descr_part}  <i>({ts_str})</i>")
+
+    if total_active > 0:
+        total_str = f"{total_active:,.0f}".replace(",", " ")
+        lines.append(f"\n<b>Сумма ненулевых балансов:</b> {total_str} ₽")
+    lines.append(
+        "\n<i>Подробная история по клиенту — <code>/balances Аймурат</code></i>"
+    )
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("client"))
 async def cmd_client(message: Message, command: CommandObject) -> None:
     name = (command.args or "").strip()

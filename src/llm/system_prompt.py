@@ -271,7 +271,13 @@ knowledge_base (rule «МОДЕЛЬ СДЕЛКИ RUB→USDT»).
   `wakeword_add` intent в batch-выдаче (поле `word` с очищенным словом).
   Бот сам одновременно положит в trigger_keywords и в KB.
 - `/report`, `/balance`, `/stock`, `/fx`, `/partners`, `/history`,
-  `/clients`, `/client <name>`, `/debts` — справочные.
+  `/clients`, `/client <name>`, `/debts`, `/balances` — справочные.
+  ⚠️ Когда юзер просит «дай балансы по доверкам», «балансы клиентов»,
+  «сводку по 11 доверкам», «какой баланс у X» — ОТПРАВЬ его в
+  `/balances` (или `/balances Аймурат` для конкретного клиента). У
+  тебя нет SQL-доступа к `client_balance_history`, поэтому пытаться
+  собрать сводку из recent_history — путь к ошибкам и неполноте. Эта
+  команда — реальный SQL-запрос к БД, она вернёт ВСЕХ за один заход.
 - `/undo <audit_id>` — откатить операцию (только создатель или owner).
   НЕ предлагай `/undo` сам.
 - `/silent on|off`, `/resync`, `/voices`, `/feedback`, `/knowledge` —
