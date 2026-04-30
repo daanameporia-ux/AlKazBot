@@ -104,11 +104,13 @@ _DEDUP_SIGNATURE: dict[str, tuple[str, ...]] = {
     "expense": ("category", "amount_rub", "amount_usdt"),
     "exchange": ("amount_rub", "amount_usdt", "fx_rate"),
     "partner_deposit": ("partner", "amount_usdt"),
+    "partner_contribution": ("partner", "amount_usdt", "source"),
     "partner_withdrawal": ("partner", "amount_usdt"),
     "cabinet_in_use": ("name_or_code",),
     "cabinet_worked_out": ("name_or_code",),
     "cabinet_blocked": ("name_or_code",),
     "cabinet_recovered": ("name_or_code",),
+    "cabinet_doverka_received": ("name_or_code",),
     "client_payout": ("client_name", "amount_usdt"),
     "wakeword_add": ("word",),
     # poa_withdrawal — same client + same amount in 2-min window means

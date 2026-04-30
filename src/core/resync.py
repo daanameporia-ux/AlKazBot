@@ -19,7 +19,11 @@ from src.logging_setup import get_logger
 
 log = get_logger(__name__)
 
-RESYNC_WINDOW_HOURS = 2
+# Bumped 2 → 24 after 2026-04-22 outage where Anthropic API was down 43h
+# and 41 of those hours of messages were lost because window was too short.
+# 24h covers most realistic outages (Railway redeploy / API key issues /
+# overnight gaps) while keeping the catch-up batch size manageable.
+RESYNC_WINDOW_HOURS = 24
 MIN_BATCH_SIZE = 2
 
 
@@ -29,10 +33,20 @@ async def resync(bot: Bot) -> dict[int, int]:
     """
     cutoff = datetime.now(UTC) - timedelta(hours=RESYNC_WINDOW_HOURS)
     async with session_scope() as session:
+        # Voice transcripts have intent_detected='voice_transcript' set by
+        # the voice middleware — they need to flow through the analyzer
+        # too, otherwise voices from an outage window stay unparsed.
+        # Live bug 2026-04-22: 78 voice transcripts in outage window were
+        # excluded by the IS NULL filter alone.
+        from sqlalchemy import or_
+
         res = await session.execute(
             select(MessageLog)
             .where(
-                MessageLog.intent_detected.is_(None),
+                or_(
+                    MessageLog.intent_detected.is_(None),
+                    MessageLog.intent_detected == "voice_transcript",
+                ),
                 MessageLog.is_bot.is_(False),
                 MessageLog.created_at >= cutoff,
                 MessageLog.text.isnot(None),

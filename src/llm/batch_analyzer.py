@@ -119,6 +119,14 @@ ANALYZE_TOOL = {
                                 "expense: {category, amount_rub?, amount_usdt?, description}\n"
                                 "partner_withdrawal: {partner, amount_usdt, from_wallet?}\n"
                                 "partner_deposit: {partner, amount_usdt}\n"
+                                "  partner_deposit фиксирует ТЕКУЩЕЕ перемещение USDT внутри оборотки (партнёр пополнил рабочий кошелёк).\n"
+                                "partner_contribution: {partner, amount_usdt, source?:('initial_depo'|'manual'|'poa_share'), notes?}\n"
+                                "  Используй для УЧЁТНЫХ пополнений капитала партнёра в оборотку. Реальные паттерны:\n"
+                                "    «Казах додеп 596 USDT в оборотку», «1500 USDT initial»,\n"
+                                "    «закинул 100 USDT на Tap», «мой стартовый депо был 3600».\n"
+                                "  source=initial_depo для самого первого депо партнёра, manual — для довносов.\n"
+                                "  Пишет в `partner_contributions` (не в partner_deposit, который про текущие движения!).\n"
+
                                 "poa_withdrawal: {client_name, amount_rub, partner_shares:[{partner,pct}], client_share_pct}\n"
                                 "  ⚠️ ТОЛЬКО когда есть ЯВНЫЙ глагол снятия: «снял/сняли/вытащили/забрали/снято/окэшил».\n"
                                 "  Без глагола — это НЕ снятие. См. правило balance vs withdrawal ниже.\n"
@@ -133,6 +141,10 @@ ANALYZE_TOOL = {
                                 "cabinet_in_use: {name_or_code}  — «ставим в работу», in_stock→in_use\n"
                                 "cabinet_worked_out: {name_or_code}  — «отработал» / «выебан», in_use→worked_out\n"
                                 "cabinet_blocked: {name_or_code}\n"
+                                "cabinet_doverka_received: {name_or_code}\n"
+                                "  Используй когда юзер сообщает что Карен (или другой поставщик) ДОВЁЗ доверенность на кабинет, который раньше был «без доверки» на складе. Реальные паттерны: «Куджба алхас довез доверку», «Габлая Лоида — доверка получена», «довезли доверку на X».\n"
+                                "  Применяет cabinets.has_doverka=true и пересчитывает стоимость в /report по полной (28к) вместо средней по предоплате.\n"
+
                                 "prepayment_given: {supplier, amount_rub, expected_cabinets?}\n"
                                 "prepayment_fulfilled: {supplier, cabinets:[{name,cost_rub}]}\n"
                                 "wallet_snapshot: {tapbank?, mercurio?, rapira?, sber_balances?, cash?}\n"
@@ -630,25 +642,33 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
     for r in rows:
         if r.tg_message_id and r.tg_message_id in exclude_ids:
             continue
-        if not r.text:
-            continue
         who = "бот" if r.is_bot else (str(r.tg_user_id) if r.tg_user_id else "?")
-        text = r.text[:RECENT_HISTORY_CHAR_CAP]
-        # Capture Telegram reply chain — when user replies to a specific
-        # message, that's THE referent for «его / её / этот» pronouns.
+        # Telegram reply chain: enables pronoun resolution against parent.
         reply_marker = (
             f" ↩reply_to={r.reply_to_tg_message_id}"
             if r.reply_to_tg_message_id
             else ""
         )
+        # Media-only messages must still appear in history with a
+        # placeholder — otherwise stickers / photos / docs become
+        # invisible to the LLM and pronouns lose their referent.
+        if not r.text:
+            if r.has_media:
+                lines.append(
+                    f"  [id={r.tg_message_id}{reply_marker}] {who}: [медиа без текста]"
+                )
+            continue
+        full_text = r.text
+        text = full_text[:RECENT_HISTORY_CHAR_CAP]
+        truncated = " […обрезано]" if len(full_text) > RECENT_HISTORY_CHAR_CAP else ""
         if r.intent_detected == "voice_transcript" and text.startswith("[voice]"):
             stripped = text.removeprefix("[voice]").strip()
             lines.append(
-                f"  [id={r.tg_message_id}{reply_marker}] {who} (голосовым): {stripped}"
+                f"  [id={r.tg_message_id}{reply_marker}] {who} (голосовым): {stripped}{truncated}"
             )
         else:
             lines.append(
-                f"  [id={r.tg_message_id}{reply_marker}] {who}: {text}"
+                f"  [id={r.tg_message_id}{reply_marker}] {who}: {text}{truncated}"
             )
     if not lines:
         return ""

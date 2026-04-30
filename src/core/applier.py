@@ -227,6 +227,41 @@ async def apply(
         await _audit(session, user_id, "create", "partner_contributions", c.id, new=f)
         return f"✅ Взнос {partner.name} записан ({c.amount_usdt} USDT)."
 
+    if intent == Intent.PARTNER_CONTRIBUTION.value:
+        # Capital contribution to партнёрская оборотка. Source semantics:
+        #   initial_depo — самый первый депо при заходе в команду
+        #   manual       — текущий довнос
+        #   poa_share    — доля от POA-снятия зачислена партнёру
+        # Owner (Казах) explicitly asked 2026-04-30 to revive this table —
+        # it stayed empty for weeks while real depos accumulated unrecorded.
+        partner = await partner_repo.resolve_partner(
+            session, str(f.get("partner", ""))
+        )
+        if partner is None:
+            raise ApplyError(f"Не нашёл партнёра: {f.get('partner')}")
+        amount_usdt = _req_dec(f.get("amount_usdt"), "amount_usdt")
+        if amount_usdt <= 0:
+            raise ApplyError(
+                f"Взнос с неположительной суммой: {amount_usdt}. Не записываю."
+            )
+        source = str(f.get("source") or "manual").strip().lower() or "manual"
+        if source not in ("initial_depo", "manual", "poa_share"):
+            source = "manual"
+        c = await partner_repo.record_contribution(
+            session,
+            partner_id=partner.id,
+            amount_usdt=amount_usdt,
+            source=source,
+            notes=str(f.get("notes") or op.summary or "")[:500] or None,
+        )
+        await _audit(
+            session, user_id, "create", "partner_contributions", c.id, new=f,
+        )
+        return (
+            f"✅ Взнос #{c.id} {partner.name}: {amount_usdt} USDT "
+            f"(source={source})."
+        )
+
     if intent == Intent.PARTNER_WITHDRAWAL.value:
         partner = await partner_repo.resolve_partner(session, str(f.get("partner", "")))
         if partner is None:
@@ -387,6 +422,48 @@ async def apply(
         )
         return f"✅ Кабинет {cab.name or cab.auto_code} восстановлен."
 
+    if intent == Intent.CABINET_DOVERKA_RECEIVED.value:
+        # Flips cabinets.has_doverka from false to true. Used when Карен
+        # довёз доверенность на кабинет, ранее лежавший «без доверки» на
+        # складе. After this, /report values it at face cost (28k) not
+        # average-of-prepayment-remainder.
+        key = str(f.get("name_or_code") or "").strip()
+        if not key:
+            raise ApplyError("Имя кабинета пустое — какой именно?")
+        cab = await cabinet_repo.find_by_name_or_code(session, key)
+        if cab is None:
+            raise ApplyError(f"Не нашёл кабинет: {key}")
+        if cab.has_doverka:
+            return (
+                f"⚠️ {cab.name or cab.auto_code} уже с доверкой — ничего не меняю."
+            )
+        from sqlalchemy import text as _sa_text_dov
+
+        old_cost_rub = cab.cost_rub
+        await session.execute(
+            _sa_text_dov(
+                "UPDATE cabinets SET has_doverka = TRUE, "
+                "  notes = COALESCE(notes,'') || :marker "
+                "WHERE id = :cid"
+            ),
+            {
+                "marker": (
+                    f" [{date.today().isoformat()}: доверка довезена, "
+                    "has_doverka=true]"
+                ),
+                "cid": cab.id,
+            },
+        )
+        await _audit(
+            session, user_id, "doverka_received", "cabinets", cab.id,
+            old={"has_doverka": False, "cost_rub": str(old_cost_rub)},
+            new={"has_doverka": True},
+        )
+        return (
+            f"✅ {cab.name or cab.auto_code} — доверка довезена. "
+            "В /report теперь по полной стоимости."
+        )
+
     if intent == Intent.PREPAYMENT_FULFILLED.value:
         # Matches "Миша отдал 4 кабинета: Аляс 25k, Боб 20k..." — creates
         # cabinets and closes the referenced prepayment if sums match.
@@ -440,11 +517,23 @@ async def apply(
 
     if intent == Intent.PREPAYMENT_GIVEN.value:
         amount_rub = _req_dec(f.get("amount_rub"), "amount_rub")
+        if amount_rub <= 0:
+            raise ApplyError(
+                f"Предоплата с неположительной суммой: {amount_rub}. Не записываю."
+            )
+        # Supplier MUST be present — otherwise we silently create
+        # «предоплата ?» что хуже чем явная ошибка.
+        supplier = str(f.get("supplier") or "").strip() or None
+        if not supplier:
+            raise ApplyError(
+                "Поставщик предоплаты не указан. Уточни кому отдали "
+                "(Карен / Миша / другой) и пришли заново."
+            )
         fx = await _resolve_fx(session, _dec(f.get("fx_rate")))
         amount_usdt = amount_rub / fx
         p = await prepayment_repo.create_pending(
             session,
-            supplier=f.get("supplier"),
+            supplier=supplier,
             amount_rub=amount_rub,
             amount_usdt=amount_usdt,
             fx_rate=fx,
@@ -452,10 +541,18 @@ async def apply(
             notes=op.summary,
         )
         await _audit(session, user_id, "create", "prepayments", p.id, new=f)
-        return f"✅ Предоплата #{p.id} {f.get('supplier') or '?'} записана."
+        return f"✅ Предоплата #{p.id} {supplier} записана."
 
     if intent == Intent.CLIENT_PAYOUT.value:
         client_name = str(f.get("client_name") or "").strip()
+        if not client_name:
+            raise ApplyError("Имя клиента пустое — кому платим?")
+        # amount_usdt validated up-front so we never persist a null payout.
+        amount_usdt_dec = _req_dec(f.get("amount_usdt"), "amount_usdt")
+        if amount_usdt_dec <= 0:
+            raise ApplyError(
+                f"Сумма к выплате должна быть > 0, получено {amount_usdt_dec}."
+            )
         client = await client_repo.get_by_name(session, client_name)
         if client is None:
             raise ApplyError(f"Нет такого клиента: {client_name}")
@@ -479,9 +576,11 @@ async def apply(
         await poa_repo.mark_client_paid(session, poa.id)
         await _audit(
             session, user_id, "client_paid", "poa_withdrawals", poa.id,
-            new={"amount_usdt": str(f.get("amount_usdt"))},
+            new={"amount_usdt": str(amount_usdt_dec)},
         )
-        return f"✅ Долг перед {client_name} закрыт."
+        return (
+            f"✅ Долг перед {client_name} закрыт ({amount_usdt_dec:.2f} USDT)."
+        )
 
     if intent == Intent.KNOWLEDGE_TEACH.value:
         category = str(f.get("category") or "rule").lower()

@@ -78,6 +78,14 @@ def render(intent: str, fields: dict[str, Any], summary: str) -> str:
             f"• Партнёр: {fields.get('partner')}",
             f"• Сумма:   {_fmt_usdt(fields.get('amount_usdt'))}",
         ]
+    elif intent_value == Intent.PARTNER_CONTRIBUTION.value:
+        lines += [
+            f"• Партнёр: {fields.get('partner')}",
+            f"• Сумма:   {_fmt_usdt(fields.get('amount_usdt'))}",
+            f"• Источник: {fields.get('source') or 'manual'} (initial_depo/manual/poa_share)",
+        ]
+        if fields.get("notes"):
+            lines.append(f"• Заметка: {fields['notes']}")
     elif intent_value == Intent.PARTNER_WITHDRAWAL.value:
         lines += [
             f"• Партнёр:    {fields.get('partner')}",
@@ -133,6 +141,12 @@ def render(intent: str, fields: dict[str, Any], summary: str) -> str:
         lines.append(f"• Кабинет: {fields.get('name_or_code')}  →  blocked")
     elif intent_value == Intent.CABINET_RECOVERED.value:
         lines.append(f"• Кабинет: {fields.get('name_or_code')}  →  recovered")
+    elif intent_value == Intent.CABINET_DOVERKA_RECEIVED.value:
+        lines += [
+            f"• Кабинет:    {fields.get('name_or_code')}",
+            "• Действие:   has_doverka  false → true",
+            "• Эффект:     в /report считается по полной стоимости",
+        ]
     elif intent_value == Intent.PREPAYMENT_GIVEN.value:
         lines += [
             f"• Поставщик: {fields.get('supplier')}",

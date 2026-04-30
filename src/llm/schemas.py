@@ -16,11 +16,13 @@ class Intent(StrEnum):
     CABINET_WORKED_OUT = "cabinet_worked_out"  # in_use → worked_out («отработал / выебан»)
     CABINET_BLOCKED = "cabinet_blocked"
     CABINET_RECOVERED = "cabinet_recovered"  # blocked → recovered через нотариалку
+    CABINET_DOVERKA_RECEIVED = "cabinet_doverka_received"  # карта на складе была без доверки → доверка довезена
     PREPAYMENT_GIVEN = "prepayment_given"
     PREPAYMENT_FULFILLED = "prepayment_fulfilled"
     EXPENSE = "expense"
     PARTNER_WITHDRAWAL = "partner_withdrawal"
     PARTNER_DEPOSIT = "partner_deposit"
+    PARTNER_CONTRIBUTION = "partner_contribution"  # initial-depo / manual долёж в оборотку — пишет в partner_contributions
     CLIENT_PAYOUT = "client_payout"
     WALLET_SNAPSHOT = "wallet_snapshot"
     CLIENT_BALANCE = "client_balance"  # «Аймурат 62к карта» — отчёт о балансе POA-клиента, НЕ снятие
