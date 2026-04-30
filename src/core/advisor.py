@@ -26,6 +26,7 @@ from decimal import Decimal
 from aiogram import Bot
 from sqlalchemy import func, select
 
+from src.bot.middlewares.logging import log_bot_reply
 from src.config import settings
 from src.db.models import (
     Cabinet,
@@ -38,6 +39,28 @@ from src.db.session import session_scope
 from src.logging_setup import get_logger
 
 log = get_logger(__name__)
+
+
+async def _send_and_log(bot: Bot, text: str, intent_hint: str) -> None:
+    """Send an advisor poke and persist it to message_log so future
+    reply_to chains and recent_history can resolve references back to it.
+
+    Live bug 2026-04-30: advisor sent «Алан 12+ ч в работе. Отработал?»,
+    Арбуз reply'нул «Нет, убери его на склад назад» — но parent был
+    не залогирован, бот потерял якорь и проигнорировал команду.
+    """
+    if not settings.main_chat_id:
+        return
+    try:
+        sent = await bot.send_message(settings.main_chat_id, text)
+        await log_bot_reply(
+            chat_id=settings.main_chat_id,
+            tg_message_id=sent.message_id,
+            text=text,
+            intent_hint=intent_hint,
+        )
+    except Exception:
+        log.exception("advisor_send_failed", intent=intent_hint)
 
 
 def _utcnow() -> datetime:
@@ -142,10 +165,7 @@ async def check_balance_vs_cabinet(bot: Bot) -> None:
                 "Отработал?"
             )
     for text in to_send:
-        try:
-            await bot.send_message(settings.main_chat_id, text)
-        except Exception:
-            log.exception("advisor_send_failed", type="balance_vs_cabinet")
+        await _send_and_log(bot, text, "advisor_balance_cabinet")
 
 
 # --------------------------------------------------------------------------- #
@@ -207,10 +227,7 @@ async def check_client_repeat(bot: Bot) -> None:
                 "а POA на него не заведён. Занесём?"
             )
     for text in to_send:
-        try:
-            await bot.send_message(settings.main_chat_id, text)
-        except Exception:
-            log.exception("advisor_send_failed", type="client_repeat")
+        await _send_and_log(bot, text, "advisor_client_repeat")
 
 
 # --------------------------------------------------------------------------- #
@@ -259,10 +276,7 @@ async def check_fx_drift(bot: Bot) -> None:
             f"{prev.rate} → {latest.rate} ₽/USDT. Проверь Rapira."
         )
     if text:
-        try:
-            await bot.send_message(settings.main_chat_id, text)
-        except Exception:
-            log.exception("advisor_send_failed", type="fx_drift")
+        await _send_and_log(bot, text, "advisor_fx_drift")
 
 
 # --------------------------------------------------------------------------- #
