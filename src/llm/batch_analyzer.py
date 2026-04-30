@@ -539,6 +539,75 @@ async def _collect_sticker_context() -> tuple[
     return packs, catalog, examples
 
 
+async def _poa_snapshot() -> str | None:
+    """Render a fresh snapshot of all POA-clients with status + last balance.
+
+    Injected into the uncached tail of the system prompt every batch call,
+    so the LLM can answer «кого сняли», «у кого баланс», «че по партии»
+    DIRECTLY without reconstructing from chat history (which gives
+    incomplete or hallucinated lists).
+    """
+    from sqlalchemy import text as _sa_text
+
+    async with session_scope() as session:
+        res = await session.execute(
+            _sa_text(
+                """
+                SELECT c.name, c.poa_status,
+                       (SELECT amount_rub  FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS bal,
+                       (SELECT description FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS descr,
+                       (SELECT created_at  FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS ts,
+                       (SELECT source      FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS src
+                FROM clients c
+                ORDER BY c.poa_status, c.id
+                """
+            )
+        )
+        rows = list(res.all())
+    if not rows:
+        return None
+    sections = {
+        "has_balance": ("💰 Баланс есть, не сняли", []),
+        "withdrawn": ("✅ Сняли", []),
+        "no_balance": ("0️⃣ Пусто", []),
+        "not_found": ("❌ Ненаход", []),
+        "unchecked": ("⏳ Не проверяли", []),
+    }
+    has_balance_total = 0
+    for nm, status, bal, descr, ts, src in rows:
+        ts_str = ts.strftime("%d.%m") if ts else "—"
+        if bal in (None, 0) and descr:
+            val = descr
+        elif bal in (None, 0):
+            val = "пусто"
+        else:
+            val = f"{int(bal):,}₽".replace(",", " ")
+            if status == "has_balance":
+                has_balance_total += int(bal)
+        src_part = f" [{src}]" if src and src != "unknown" else ""
+        line = f"  • {nm}: {val}{src_part}  ({ts_str})"
+        sections.setdefault(status, (status, []))[1].append(line)
+
+    parts = ["# POA-клиенты — актуальный статус из БД (на момент запроса)"]
+    parts.append(
+        "ИСПОЛЬЗУЙ ЭТИ ДАННЫЕ для ответов на «кого сняли / у кого баланс / "
+        "че по партии / какой баланс у X». Это свежий SELECT из clients + "
+        "client_balance_history. Если юзер спросит про статусы клиентов — "
+        "отвечай отсюда, развёрнуто и по-человечески, не отсылай на /balances."
+    )
+    for code in ("has_balance", "withdrawn", "no_balance", "not_found", "unchecked"):
+        title, lines = sections[code]
+        if not lines:
+            continue
+        parts.append(f"\n{title} ({len(lines)}):")
+        parts.extend(lines)
+    if has_balance_total > 0:
+        parts.append(
+            f"\n💰 Сумма ждущих снятия: {has_balance_total:,} ₽".replace(",", " ")
+        )
+    return "\n".join(parts)
+
+
 async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
     """Pull last N messages from message_log (including bot replies) so the
     analyzer has conversation context. Messages that are already part of
@@ -670,6 +739,11 @@ async def analyze_batch(
         sticker_examples,
     ) = await _collect_sticker_context()
 
+    # Live POA-clients snapshot — injected into the uncached tail so LLM
+    # can answer «кого сняли / у кого баланс» from real DB data, not
+    # from incomplete recent_history.
+    poa_snapshot = await _poa_snapshot()
+
     # `recent_history` is the non-cached last system block — it changes every
     # request, so we keep the cached sections ahead of it.
     system_blocks = build_system_blocks(
@@ -678,6 +752,7 @@ async def analyze_batch(
         sticker_pack_emojis=sticker_packs,
         sticker_described_catalog=sticker_catalog,
         sticker_usage_examples=sticker_examples,
+        poa_snapshot=poa_snapshot,
         recent_messages=recent_history or None,
     )
 

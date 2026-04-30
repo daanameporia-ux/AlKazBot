@@ -273,24 +273,30 @@ knowledge_base (rule «МОДЕЛЬ СДЕЛКИ RUB→USDT»).
 - `/report`, `/balance`, `/stock`, `/fx`, `/partners`, `/history`,
   `/clients`, `/client <name>`, `/debts`, `/balances` — справочные.
 
-⚠️⚠️ КРИТИЧЕСКОЕ ПРАВИЛО про POA-клиентов: ВСЕГДА перенаправляй на
-`/balances`, не пытайся отвечать из памяти. У тебя НЕТ доступа к
-`clients` / `client_balance_history` / `clients.poa_status` без
-команды. Recent_history содержит обрывки — реконструировать неполный
-список — это **гарантированный косяк** (живой баг 2026-04-30 утром:
-давал 6 из 11 клиентов, путал, выдумывал «Иблан», бесил юзера).
+# POA-клиенты — отвечай развёрнуто из инжектированного блока
 
-Триггеры (любой из них) → `chat_reply` = «Дай `/balances` — актуально
-из БД» (или для одного клиента: «`/balances Аймурат`»):
-  - «дай балансы / сводку / статусы / список»
-  - «по доверкам / по партии / по вчерашним / по 11 / по 13»
-  - «кого сняли», «у кого баланс», «кого не нашли», «кто пусто»
-  - «какой баланс у X», «что с X», «X сняли?»
-  - «че по доверкам», «статусы клиентов», «расклад по POA»
+В uncached хвосте system-prompt каждый батч-вызов получает СВЕЖИЙ
+снапшот всех POA-клиентов: имя, статус (has_balance / withdrawn /
+no_balance / not_found / unchecked), последний баланс из
+`client_balance_history`, источник, дата.
 
-`/balances` сам сгруппирует по статусам (💰 has_balance, ✅ withdrawn,
-0️⃣ no_balance, ❌ not_found, ⏳ unchecked) и посчитает сумму ждущих
-снятия. Никогда не ловчи — отправляй прямо.
+На любой вопрос про POA — **отвечай прямо из этого блока**, развёрнуто
+и по-человечески:
+  - «че по доверкам / статусы / сводка по партии» → разнеси по
+    статусам, перечисли имена, дай сумму ждущих снятия.
+  - «кого сняли вчера» → `withdrawn` секция, имена + суммы.
+  - «у кого баланс» / «у кого ещё деньги» → `has_balance` секция.
+  - «кого не нашли» → `not_found`.
+  - «какой баланс у Аймурат» → ровно его строка из снапшота.
+
+НЕ отсылай на `/balances` — данные у тебя уже в контексте, формируй
+ответ сам, нормальным человеческим языком, как нормальный бухгалтер
+ответил бы партнёру в чате. Можешь предложить дальше («снимем
+сегодня?», «по этим двум что делаем?»).
+
+Если юзер ХОЧЕТ команду явно («дай команду», «через /balances»,
+«ткни в команду») — тогда упомяни `/balances` или `/balances Аймурат`.
+Но не как первая реакция.
 - `/undo <audit_id>` — откатить операцию (только создатель или owner).
   НЕ предлагай `/undo` сам.
 - `/silent on|off`, `/resync`, `/voices`, `/feedback`, `/knowledge` —
@@ -544,6 +550,7 @@ def build_system_blocks(
         tuple[str, str | None, list[tuple[str, str, str]]]
     ] | None = None,
     sticker_usage_examples: list[dict[str, Any]] | None = None,
+    poa_snapshot: str | None = None,
     recent_messages: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return the `system=` argument for `anthropic.messages.create`.
@@ -592,8 +599,10 @@ def build_system_blocks(
             "cache_control": SHORT_TTL,
         },
     ]
-    # Build the uncached tail: sticker usage examples + recent chat.
+    # Build the uncached tail: live POA snapshot + sticker usage + recent chat.
     tail_parts: list[str] = []
+    if poa_snapshot:
+        tail_parts.append(poa_snapshot)
     if sticker_usage_examples:
         tail_parts.append(render_sticker_usage(sticker_usage_examples))
     if recent_messages:
