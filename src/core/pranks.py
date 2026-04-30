@@ -15,6 +15,7 @@ import random
 
 from aiogram import Bot
 
+from src.bot.middlewares.logging import log_bot_reply
 from src.config import settings
 from src.logging_setup import get_logger
 
@@ -43,6 +44,12 @@ async def maybe_prank(bot: Bot) -> None:
     text = random.choice(PRANK_MESSAGES)
     try:
         sent = await bot.send_message(settings.main_chat_id, text)
+        await log_bot_reply(
+            chat_id=settings.main_chat_id,
+            tg_message_id=sent.message_id,
+            text=text,
+            intent_hint="prank",
+        )
         # Try to pin — best-effort, ignore if bot lacks rights or method fails.
         with contextlib.suppress(Exception):
             await bot.pin_chat_message(

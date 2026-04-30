@@ -28,6 +28,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import func, select
 
+from src.bot.middlewares.logging import log_bot_reply
 from src.config import settings
 from src.db.models import (
     AuditLog,
@@ -42,6 +43,29 @@ from src.db.session import session_scope
 from src.logging_setup import get_logger
 
 log = get_logger(__name__)
+
+
+async def _send_reminder(bot: Bot, text: str, reminder_type: str) -> None:
+    """Send a reminder and persist it to message_log so future Telegram-Reply
+    chains and the LLM's recent_history can resolve back to it.
+
+    Live bug 2026-04-30 12:05: reminder «Кабинет Алан 12+ ч в работе.
+    Отработал?» landed in TG, Арбуз replied «Нет, убери на склад» — but
+    the reminder was sent via bare bot.send_message and never logged,
+    so the bot lost the context anchor.
+    """
+    if not settings.main_chat_id:
+        return
+    try:
+        sent = await bot.send_message(settings.main_chat_id, text)
+        await log_bot_reply(
+            chat_id=settings.main_chat_id,
+            tg_message_id=sent.message_id,
+            text=text,
+            intent_hint=f"reminder_{reminder_type}",
+        )
+    except Exception:
+        log.exception("reminder_send_failed", type=reminder_type)
 
 
 def _utcnow() -> datetime:
@@ -146,10 +170,7 @@ async def _check_report_overdue(bot: Bot) -> None:
     # Phase 2: send. If this fails, we've already marked fired — we'll lose
     # this one nag, but that's preferable to duplicates on every retry.
     if text:
-        try:
-            await bot.send_message(settings.main_chat_id, text)
-        except Exception:
-            log.exception("reminder_send_failed", type="report_overdue")
+        await _send_reminder(bot, text, "report_overdue")
 
 
 async def _check_acquiring_missing(bot: Bot) -> None:
@@ -177,10 +198,7 @@ async def _check_acquiring_missing(bot: Bot) -> None:
             "Сегодня платили?"
         )
     if text:
-        try:
-            await bot.send_message(settings.main_chat_id, text)
-        except Exception:
-            log.exception("reminder_send_failed", type="acquiring_missing")
+        await _send_reminder(bot, text, "acquiring_missing")
 
 
 async def _check_cabinet_too_long(bot: Bot) -> None:
@@ -207,10 +225,7 @@ async def _check_cabinet_too_long(bot: Bot) -> None:
                 f"Кабинет {name} уже 12+ часов в работе. Ещё крутится или забыли отметить?"
             )
     for text in to_send:
-        try:
-            await bot.send_message(settings.main_chat_id, text)
-        except Exception:
-            log.exception("reminder_send_failed", type="cabinet_too_long")
+        await _send_reminder(bot, text, "cabinet_too_long")
 
 
 async def _check_poa_without_exchange(bot: Bot) -> None:
@@ -239,10 +254,7 @@ async def _check_poa_without_exchange(bot: Bot) -> None:
                 " Курс нужен — кинь строку вида '150000/9300=16.13'."
             )
     for text in to_send:
-        try:
-            await bot.send_message(settings.main_chat_id, text)
-        except Exception:
-            log.exception("reminder_send_failed", type="poa_without_exchange")
+        await _send_reminder(bot, text, "poa_without_exchange")
 
 
 async def _check_client_debt_stale(bot: Bot) -> None:
@@ -271,10 +283,7 @@ async def _check_client_debt_stale(bot: Bot) -> None:
                 " Прошло больше суток — может пора?"
             )
     for text in to_send:
-        try:
-            await bot.send_message(settings.main_chat_id, text)
-        except Exception:
-            log.exception("reminder_send_failed", type="client_debt_stale")
+        await _send_reminder(bot, text, "client_debt_stale")
 
 
 # --------------------------------------------------------------------------- #

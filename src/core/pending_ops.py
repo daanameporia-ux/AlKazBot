@@ -111,6 +111,14 @@ _DEDUP_SIGNATURE: dict[str, tuple[str, ...]] = {
     "cabinet_recovered": ("name_or_code",),
     "client_payout": ("client_name", "amount_usdt"),
     "wakeword_add": ("word",),
+    # poa_withdrawal — same client + same amount in 2-min window means
+    # the LLM produced two cards from one user phrase (e.g. «Никонов
+    # сняли 50, мне 25 Арбузу 10» got tokenized twice). Live bug
+    # 2026-04-24 #49-54 == #55-60 was exactly this.
+    "poa_withdrawal": ("client_name", "amount_rub"),
+    # client_balance — same client + same amount in window means
+    # duplicate of «X 62к карта» and the immediate clarifying repeat.
+    "client_balance": ("client_name", "amount_rub"),
     # knowledge_teach can come in flurries of variations — dedup by the
     # exact content string (case-insensitive) within the category.
     "knowledge_teach": ("category", "key", "content"),
@@ -181,22 +189,38 @@ async def attach_preview(uid: str, preview_message_id: int) -> None:
 async def pop_for_confirm(uid: str) -> PendingOp | None:
     """Atomically flip pending→confirmed and return the view — or None if
     the row doesn't exist / was already handled / has expired.
+
+    DEPRECATED for the confirm-callback path: this commits the status
+    change in its own session, which means if the subsequent apply()
+    fails the row stays 'confirmed' but no real DB write happened.
+    Live bug 2026-04-29: poa_withdrawal cards landed at status='confirmed'
+    while applier raised on missing client_share_pct, leaving 0 rows in
+    poa_withdrawals. Use `pop_for_confirm_in_session` from the callback
+    handler so the status flip and the apply share one atomic transaction.
     """
     async with session_scope() as session:
-        res = await session.execute(
-            select(PendingOperation).where(PendingOperation.uid == uid)
-        )
-        row = res.scalar_one_or_none()
-        if row is None:
-            return None
-        if row.status != "pending":
-            return None
-        if _is_expired(row):
-            row.status = "expired"
-            return None
-        row.status = "confirmed"
-        row.confirmed_at = _utcnow()
-        return _to_view(row)
+        return await pop_for_confirm_in_session(session, uid)
+
+
+async def pop_for_confirm_in_session(session, uid: str) -> PendingOp | None:
+    """Same semantics as pop_for_confirm but uses the caller's session,
+    so the status flip rolls back together with whatever apply() did
+    (or didn't) in the same transaction.
+    """
+    res = await session.execute(
+        select(PendingOperation).where(PendingOperation.uid == uid)
+    )
+    row = res.scalar_one_or_none()
+    if row is None:
+        return None
+    if row.status != "pending":
+        return None
+    if _is_expired(row):
+        row.status = "expired"
+        return None
+    row.status = "confirmed"
+    row.confirmed_at = _utcnow()
+    return _to_view(row)
 
 
 async def pop_for_cancel(uid: str) -> PendingOp | None:
@@ -261,6 +285,8 @@ async def expire_stale(bot=None) -> int:
     if bot is not None:
         import contextlib
 
+        from src.bot.middlewares.logging import log_bot_reply
+
         for row in stale:
             if row.preview_message_id is None:
                 continue
@@ -270,10 +296,20 @@ async def expire_stale(bot=None) -> int:
                     message_id=row.preview_message_id,
                     reply_markup=None,
                 )
-                await bot.send_message(
-                    row.chat_id,
+                expiry_text = (
                     f"⏰ Карточка «{row.summary[:80]}» истекла — не записал. "
-                    "Пришли снова если нужно.",
+                    "Пришли снова если нужно."
+                )
+                sent = await bot.send_message(
+                    row.chat_id,
+                    expiry_text,
                     reply_to_message_id=row.preview_message_id,
+                )
+                # Persist so a reply to the expiry notice resolves the chain.
+                await log_bot_reply(
+                    chat_id=row.chat_id,
+                    tg_message_id=sent.message_id,
+                    text=expiry_text,
+                    intent_hint="pending_op_expired",
                 )
     return len(stale)

@@ -69,13 +69,21 @@ async def on_confirm(q: CallbackQuery) -> None:
             show_alert=True,
         )
         return
-    op = await pending_ops.pop_for_confirm(uid)
-    if op is None:
-        await q.answer("Эта операция уже обработана или истекла.", show_alert=True)
-        return
 
+    # ATOMIC: status flip + apply share one transaction. If apply raises,
+    # the status update rolls back and the row stays at 'pending' — user
+    # can retry. Live bug 2026-04-29 (poa_withdrawal cards confirmed but
+    # 0 rows in poa_withdrawals) was caused by these living in two
+    # separate sessions.
+    reply_text: str | None = None
     try:
         async with session_scope() as session:
+            op = await pending_ops.pop_for_confirm_in_session(session, uid)
+            if op is None:
+                await q.answer(
+                    "Эта операция уже обработана или истекла.", show_alert=True
+                )
+                return
             reply_text = await apply(
                 session, op, created_by_tg_id=q.from_user.id
             )
@@ -85,15 +93,19 @@ async def on_confirm(q: CallbackQuery) -> None:
             await _record_verified(session, op)
     except ApplyError as e:
         log.warning("apply_error", uid=uid, error=str(e))
-        # Put the op back for correction — user can press cancel or we can
-        # re-prompt; for now tell the user what failed.
         await q.answer(f"Не смог записать: {e}", show_alert=True)
         if q.message:
-            await q.message.edit_reply_markup(reply_markup=None)
+            with contextlib.suppress(Exception):
+                await q.message.edit_reply_markup(reply_markup=None)
         return
     except Exception:
         log.exception("apply_unexpected_error", uid=uid)
         await q.answer("Ошибка при записи. Смотри логи.", show_alert=True)
+        return
+
+    if reply_text is None:
+        # Defensive — shouldn't happen, but don't pretend success.
+        await q.answer("Состояние неясно — проверь /history.", show_alert=True)
         return
 
     # Success — edit the preview message to strike the buttons and append
