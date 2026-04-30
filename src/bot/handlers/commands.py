@@ -453,17 +453,17 @@ async def cmd_balances(message: Message, command: CommandObject) -> None:
             await message.answer("\n".join(lines))
             return
 
-        # All clients — latest balance per client
+        # All clients — group by poa_status, show latest balance per client
         res = await session.execute(
             sa_text(
                 """
-                SELECT c.id, c.name,
+                SELECT c.id, c.name, c.poa_status,
                        (SELECT amount_rub  FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS bal,
                        (SELECT source      FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS src,
                        (SELECT description FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS descr,
                        (SELECT created_at  FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS ts
                 FROM clients c
-                ORDER BY c.id
+                ORDER BY c.poa_status, c.id
                 """
             )
         )
@@ -472,34 +472,61 @@ async def cmd_balances(message: Message, command: CommandObject) -> None:
         await message.answer("Клиентов нет.")
         return
 
-    lines = ["<b>Балансы POA-клиентов (последние снятия):</b>"]
-    total_active = 0
-    for _cid, nm, bal, src, descr, ts in rows:
-        if ts is None:
-            lines.append(f"  • <b>{nm}</b> — баланс не проверяли")
-            continue
-        ts_str = ts.strftime("%d.%m")
-        if descr and (bal is None or bal == 0):
-            val = f"<i>{descr}</i>"
-        elif bal == 0:
-            val = "<i>пусто</i>"
-        else:
-            v = f"{bal:,.0f}₽".replace(",", " ")
-            val = f"<b>{v}</b>"
-            import contextlib
-            with contextlib.suppress(TypeError, ValueError):
-                total_active += int(bal or 0)
-        src_part = ""
-        if src and src not in ("unknown", None):
-            src_part = f" [{src}]"
-        descr_part = ""
-        if descr and bal and bal != 0:
-            descr_part = f" — {descr}"
-        lines.append(f"  • <b>{nm}</b>: {val}{src_part}{descr_part}  <i>({ts_str})</i>")
+    # Group by poa_status
+    groups: dict[str, list[tuple]] = {
+        "has_balance": [],
+        "withdrawn": [],
+        "no_balance": [],
+        "not_found": [],
+        "unchecked": [],
+    }
+    for r in rows:
+        status = r[2] or "unchecked"
+        groups.setdefault(status, []).append(r)
 
-    if total_active > 0:
-        total_str = f"{total_active:,.0f}".replace(",", " ")
-        lines.append(f"\n<b>Сумма ненулевых балансов:</b> {total_str} ₽")
+    SECTIONS = [
+        ("has_balance", "💰 Баланс есть, ещё не сняли"),
+        ("withdrawn", "✅ Сняли"),
+        ("no_balance", "0️⃣ Пусто"),
+        ("not_found", "❌ Ненаход"),
+        ("unchecked", "⏳ Ещё не проверяли"),
+    ]
+
+    def _fmt_bal(bal, descr) -> str:
+        if bal in (None, 0) and descr:
+            return f"<i>{descr}</i>"
+        if bal in (None, 0):
+            return "<i>пусто</i>"
+        v = f"{bal:,.0f}₽".replace(",", " ")
+        return f"<b>{v}</b>"
+
+    lines = ["<b>POA-клиенты по статусам:</b>"]
+    has_balance_total = 0
+    for code, title in SECTIONS:
+        items = groups.get(code) or []
+        if not items:
+            continue
+        lines.append(f"\n<b>{title}</b> ({len(items)}):")
+        for _cid, nm, _status, bal, src, descr, ts in items:
+            ts_str = ts.strftime("%d.%m") if ts else "—"
+            val = _fmt_bal(bal, descr)
+            src_part = f" [{src}]" if src and src not in ("unknown", None) else ""
+            note = ""
+            if code == "has_balance" and descr and bal:
+                note = f" — {descr}"
+                import contextlib
+                with contextlib.suppress(TypeError, ValueError):
+                    has_balance_total += int(bal or 0)
+            elif code == "has_balance":
+                import contextlib
+                with contextlib.suppress(TypeError, ValueError):
+                    has_balance_total += int(bal or 0)
+            lines.append(f"  • <b>{nm}</b>: {val}{src_part}{note}  <i>({ts_str})</i>")
+
+    if has_balance_total > 0:
+        total_str = f"{has_balance_total:,.0f}".replace(",", " ")
+        lines.append(f"\n<b>💰 Ждёт снятия:</b> {total_str} ₽")
+
     lines.append(
         "\n<i>Подробная история по клиенту — <code>/balances Аймурат</code></i>"
     )

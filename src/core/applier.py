@@ -308,6 +308,13 @@ async def apply(
             notes=op.summary,
             created_by_user_id=user_id,
         )
+        # Mark client as withdrawn — final lifecycle status (per owner 2026-04-30).
+        from sqlalchemy import text as _sa_text_w
+
+        await session.execute(
+            _sa_text_w("UPDATE clients SET poa_status='withdrawn' WHERE id=:cid"),
+            {"cid": c.id},
+        )
         await _audit(session, user_id, "create", "poa_withdrawals", poa.id, new=f)
         return (
             f"✅ Снятие #{poa.id} по {client_name} записано. "
@@ -562,14 +569,46 @@ async def apply(
         else:
             balance_str = f"{amount_rub_dec:,.0f}₽".replace(",", " ")
         summary_line = f"\n[{today}] Баланс {balance_str} ({source})."
+
+        # Auto-derive poa_status from this balance check (per owner 2026-04-30):
+        #   * не трогаем если уже 'withdrawn' (снятие — необратимый финал)
+        #   * description упоминает 'ненаход' / 'не найден' / 'не находит' → not_found
+        #   * amount > 0 → has_balance
+        #   * amount == 0 → no_balance
+        descr_l = (description or "").lower()
+        new_poa_status: str | None
+        if any(s in descr_l for s in ("ненаход", "не найден", "не находит")):
+            new_poa_status = "not_found"
+        elif amount_rub_dec > 0:
+            new_poa_status = "has_balance"
+        elif amount_rub_dec == 0:
+            new_poa_status = "no_balance"
+        else:
+            new_poa_status = None
+
         # Cap notes to ~3000 chars so it doesn't grow forever
         new_notes = ((client.notes or "") + summary_line)[-3000:]
         from sqlalchemy import text as _sa_text2
 
-        await session.execute(
-            _sa_text2("UPDATE clients SET notes=:n WHERE id=:cid"),
-            {"n": new_notes, "cid": client.id},
-        )
+        # Don't downgrade from 'withdrawn' — that final state is set by
+        # poa_withdrawal apply and shouldn't flip back to has_balance
+        # if someone re-checks the (now-empty) account.
+        if new_poa_status and getattr(client, "poa_status", "unchecked") != "withdrawn":
+            await session.execute(
+                _sa_text2(
+                    "UPDATE clients SET notes=:n, poa_status=:s WHERE id=:cid"
+                ),
+                {
+                    "n": new_notes,
+                    "s": new_poa_status,
+                    "cid": client.id,
+                },
+            )
+        else:
+            await session.execute(
+                _sa_text2("UPDATE clients SET notes=:n WHERE id=:cid"),
+                {"n": new_notes, "cid": client.id},
+            )
 
         await _audit(
             session,

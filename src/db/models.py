@@ -188,10 +188,19 @@ class Cabinet(Base):
 
 class Client(Base):
     __tablename__ = "clients"
+    __table_args__ = (
+        CheckConstraint(
+            "poa_status IN ('unchecked','has_balance','no_balance','not_found','withdrawn')",
+            name="ck_clients_poa_status",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
+    poa_status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="unchecked"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
