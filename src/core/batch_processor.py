@@ -189,7 +189,7 @@ def make_flush_handler(bot: Bot):
 
         kb = await _load_kb_items()
         try:
-            analysis = await analyze_batch(batch, knowledge_items=kb)
+            analysis = await analyze_batch(batch, knowledge_items=kb, bot=bot)
         except Exception:
             log.exception("batch_analyze_failed", chat_id=batch.chat_id)
             return

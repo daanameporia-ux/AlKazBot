@@ -552,12 +552,14 @@ def build_system_blocks(
     sticker_usage_examples: list[dict[str, Any]] | None = None,
     poa_snapshot: str | None = None,
     recent_messages: str | None = None,
+    analyzer_instructions: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return the `system=` argument for `anthropic.messages.create`.
 
     Layout (optimised for prompt-caching hit rate):
 
-      [0] CORE_INSTRUCTIONS        — cached, 1h TTL (rarely changes)
+      [0] CORE_INSTRUCTIONS
+          + optional analyzer task — cached, 1h TTL (rarely changes)
       [1] KB                       — cached, 1h TTL (changes on teach)
       [2] FEW_SHOT                 — cached, 1h TTL (changes on ✅)
       [3] STICKER_LIBRARY          — cached, 5m TTL (new stickers arrive)
@@ -574,10 +576,14 @@ def build_system_blocks(
     LONG_TTL = {"type": "ephemeral", "ttl": "1h"}
     SHORT_TTL = {"type": "ephemeral"}  # default 5m
 
+    core_text = CORE_INSTRUCTIONS
+    if analyzer_instructions:
+        core_text = f"{core_text}\n\n{analyzer_instructions}"
+
     blocks: list[dict[str, Any]] = [
         {
             "type": "text",
-            "text": CORE_INSTRUCTIONS,
+            "text": core_text,
             "cache_control": LONG_TTL,
         },
         {

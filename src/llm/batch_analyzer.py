@@ -33,10 +33,12 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from aiogram import Bot
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from src.bot.batcher import Batch
+from src.core.media_context import collect_requested_media_context
 from src.db.models import MessageLog, VoiceMessage
 from src.db.repositories import few_shot as few_shot_repo
 from src.db.repositories import stickers as sticker_repo
@@ -364,9 +366,31 @@ poa_withdrawal. Делай `client_balance` или `knowledge_teach` с category
 Если триггера нет (пассивный батч из буфера) и операций тоже нет —
 `chat_only=true`, `chat_reply` пустой, сиди молча.
 
+## Фото/PDF — только по явному текущему запросу
+
+Фото и PDF из чата не читаются автоматически. Если в текущем запросе
+юзер пишет «разбери фото/PDF выше», «глянь скрин», отвечает на файл,
+или прислал файл с @-обращением — в prompt появится блок
+`# Вложения по текущему запросу`:
+
+- PDF будет вставлен как текст с `SBER_HINT` или `ALIEN_PDF_HINT`.
+- Фото будет приложено отдельным image-блоком с текстовой меткой
+  `[Фото id=...]`.
+
+Для фото:
+  * банковский/ATM-чек — извлекай операции только если это реально
+    учётное событие;
+  * чек магазина — expense;
+  * обменник с курсом — exchange;
+  * экран TapBank/Mercurio/Rapira/Sber с остатками — wallet_snapshot;
+  * СМС/СБП-поступление на Сбер — НЕ отдельная операция:
+    `operations=[]`, в `chat_reply` коротко отметь факт.
+
+Если фото мем/селфи/нерелевантное — `chat_only=true` и короткий ответ.
+
 ## PDF — ЖЁСТКО БЕЗ АВТОПАРСИНГА
 
-Триггер `trigger_kind=document` — в текст вписан либо `SBER_HINT`
+Если во вложениях есть PDF, в текст вписан либо `SBER_HINT`
 (это сбер-выписка), либо `ALIEN_PDF_HINT` (произвольный PDF).
 
 По умолчанию: `operations=[]`, `chat_reply` = короткая сводка.
@@ -482,7 +506,8 @@ def _format_batch(batch: Batch) -> str:
     return "\n".join(parts) if parts else "(empty batch)"
 
 
-RECENT_HISTORY_WINDOW = 80
+RECENT_HISTORY_DEFAULT_WINDOW = 30
+RECENT_HISTORY_EXPANDED_WINDOW = 80
 # Per-message char cap in recent_history — 250 is enough for voice
 # transcripts (usually 1-3 sentences) and short text ops. Longer
 # texts get truncated. Reducing from 500 → 250 ~halves the recent-
@@ -620,7 +645,49 @@ async def _poa_snapshot() -> str | None:
     return "\n".join(parts)
 
 
-async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
+def _needs_deep_history(batch: Batch, rendered: str) -> bool:
+    if batch.trigger_kind == "reply":
+        return True
+    lo = rendered.lower()
+    return any(
+        token in lo
+        for token in (
+            "выше",
+            "до этого",
+            "раньше",
+            "предыдущ",
+            "последн",
+            "обсуждали",
+            "что там",
+            "о чем",
+            "о чём",
+        )
+    )
+
+
+def _needs_poa_snapshot(rendered: str) -> bool:
+    lo = rendered.lower()
+    return any(
+        token in lo
+        for token in (
+            "poa",
+            "поа",
+            "довер",
+            "клиент",
+            "баланс",
+            "снял",
+            "сняли",
+            "снятие",
+            "доля",
+            "доли",
+            "долг",
+            "пусто",
+            "ненаход",
+        )
+    )
+
+
+async def _recent_history(chat_id: int, exclude_ids: set[int], *, limit: int) -> str:
     """Pull last N messages from message_log (including bot replies) so the
     analyzer has conversation context. Messages that are already part of
     the current batch are excluded to avoid double-quoting.
@@ -634,7 +701,7 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
             select(MessageLog)
             .where(MessageLog.chat_id == chat_id)
             .order_by(MessageLog.id.desc())
-            .limit(RECENT_HISTORY_WINDOW)
+            .limit(limit)
         )
         rows = list(res.scalars().all())
     rows.reverse()  # chronological ascending
@@ -654,21 +721,25 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
         # invisible to the LLM and pronouns lose their referent.
         if not r.text:
             if r.has_media:
+                media_label = _media_history_label(r)
                 lines.append(
-                    f"  [id={r.tg_message_id}{reply_marker}] {who}: [медиа без текста]"
+                    f"  [id={r.tg_message_id}{reply_marker}] {who}: [{media_label}]"
                 )
             continue
         full_text = r.text
         text = full_text[:RECENT_HISTORY_CHAR_CAP]
         truncated = " […обрезано]" if len(full_text) > RECENT_HISTORY_CHAR_CAP else ""
+        media_prefix = f"[{_media_history_label(r)}] " if r.media_type else ""
         if r.intent_detected == "voice_transcript" and text.startswith("[voice]"):
             stripped = text.removeprefix("[voice]").strip()
             lines.append(
-                f"  [id={r.tg_message_id}{reply_marker}] {who} (голосовым): {stripped}{truncated}"
+                f"  [id={r.tg_message_id}{reply_marker}] {who} (голосовым): "
+                f"{media_prefix}{stripped}{truncated}"
             )
         else:
             lines.append(
-                f"  [id={r.tg_message_id}{reply_marker}] {who}: {text}{truncated}"
+                f"  [id={r.tg_message_id}{reply_marker}] {who}: "
+                f"{media_prefix}{text}{truncated}"
             )
     if not lines:
         return ""
@@ -682,6 +753,17 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
         "ответ в parent-сообщении.\n"
     )
     return header + "\n".join(lines)
+
+
+def _media_history_label(row: MessageLog) -> str:
+    if row.media_type == "pdf":
+        name = f": {row.media_file_name}" if row.media_file_name else ""
+        return f"PDF{name}"
+    if row.media_type == "photo":
+        return "фото/скрин без текста"
+    if row.media_type:
+        return row.media_type
+    return "медиа без текста"
 
 
 VOICE_TRANSCRIBE_CATCHUP_MIN = 10
@@ -745,6 +827,7 @@ async def analyze_batch(
     batch: Batch,
     *,
     knowledge_items: list[dict] | None = None,
+    bot: Bot | None = None,
 ) -> BatchAnalysis:
     rendered = _format_batch(batch)
 
@@ -762,7 +845,14 @@ async def analyze_batch(
     if batch.trigger:
         batch_ids.add(batch.trigger.tg_message_id)
     batch_ids.update(m.tg_message_id for m in batch.messages)
-    recent_history = await _recent_history(batch.chat_id, batch_ids)
+    recent_limit = (
+        RECENT_HISTORY_EXPANDED_WINDOW
+        if _needs_deep_history(batch, rendered)
+        else RECENT_HISTORY_DEFAULT_WINDOW
+    )
+    recent_history = await _recent_history(batch.chat_id, batch_ids, limit=recent_limit)
+
+    media_context = await collect_requested_media_context(bot=bot, batch=batch)
 
     # Pull a mix of verified examples across the most likely intents.
     few_shot_items = await _collect_few_shot()
@@ -779,7 +869,7 @@ async def analyze_batch(
     # Live POA-clients snapshot — injected into the uncached tail so LLM
     # can answer «кого сняли / у кого баланс» from real DB data, not
     # from incomplete recent_history.
-    poa_snapshot = await _poa_snapshot()
+    poa_snapshot = await _poa_snapshot() if _needs_poa_snapshot(rendered) else None
 
     # `recent_history` is the non-cached last system block — it changes every
     # request, so we keep the cached sections ahead of it.
@@ -791,13 +881,23 @@ async def analyze_batch(
         sticker_usage_examples=sticker_examples,
         poa_snapshot=poa_snapshot,
         recent_messages=recent_history or None,
+        analyzer_instructions=BATCH_INSTRUCTION,
     )
 
-    user_prompt = f"{BATCH_INSTRUCTION}\n\nMessages to analyze now:\n{rendered}"
+    user_prompt = f"Messages to analyze now:\n{rendered}"
+    if media_context and media_context.text:
+        user_prompt += f"\n\n{media_context.text}"
+
+    user_content: str | list[dict[str, Any]]
+    if media_context and media_context.content_blocks:
+        user_content = [{"type": "text", "text": user_prompt}]
+        user_content.extend(media_context.content_blocks)
+    else:
+        user_content = user_prompt
 
     resp = await complete(
         system_blocks=system_blocks,
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=[{"role": "user", "content": user_content}],
         tools=[ANALYZE_TOOL],
         tool_choice={"type": "tool", "name": "analyze_batch"},
         max_tokens=2500,

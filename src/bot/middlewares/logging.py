@@ -39,6 +39,28 @@ class MessageLoggingMiddleware(BaseMiddleware):
 
     @staticmethod
     async def _persist(msg: Message) -> None:
+        media_type: str | None = None
+        media_file_id: str | None = None
+        media_file_unique_id: str | None = None
+        media_file_name: str | None = None
+        media_mime_type: str | None = None
+        media_file_size: int | None = None
+
+        if msg.photo:
+            photo = msg.photo[-1]
+            media_type = "photo"
+            media_file_id = photo.file_id
+            media_file_unique_id = photo.file_unique_id
+            media_file_size = photo.file_size
+        elif msg.document:
+            doc = msg.document
+            media_type = "pdf" if doc.mime_type == "application/pdf" else "document"
+            media_file_id = doc.file_id
+            media_file_unique_id = doc.file_unique_id
+            media_file_name = doc.file_name
+            media_mime_type = doc.mime_type
+            media_file_size = doc.file_size
+
         async with session_scope() as session:
             # Idempotency — spec §"Оптимизации/Надёжность": dedupe by tg_message_id.
             existing = await session.execute(
@@ -57,6 +79,12 @@ class MessageLoggingMiddleware(BaseMiddleware):
                 has_media=bool(
                     msg.photo or msg.document or msg.video or msg.voice or msg.audio
                 ),
+                media_type=media_type,
+                media_file_id=media_file_id,
+                media_file_unique_id=media_file_unique_id,
+                media_file_name=media_file_name,
+                media_mime_type=media_mime_type,
+                media_file_size=media_file_size,
                 is_bot=bool(msg.from_user.is_bot) if msg.from_user else False,
                 is_mention=False,  # set later in handler once we know
                 reply_to_tg_message_id=(
