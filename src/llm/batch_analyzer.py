@@ -634,17 +634,34 @@ async def _recent_history(chat_id: int, exclude_ids: set[int]) -> str:
             continue
         who = "бот" if r.is_bot else (str(r.tg_user_id) if r.tg_user_id else "?")
         text = r.text[:RECENT_HISTORY_CHAR_CAP]
+        # Capture Telegram reply chain — when user replies to a specific
+        # message, that's THE referent for «его / её / этот» pronouns.
+        reply_marker = (
+            f" ↩reply_to={r.reply_to_tg_message_id}"
+            if r.reply_to_tg_message_id
+            else ""
+        )
         if r.intent_detected == "voice_transcript" and text.startswith("[voice]"):
-            # Strip the [voice] prefix and make the origin explicit.
             stripped = text.removeprefix("[voice]").strip()
             lines.append(
-                f"  [id={r.tg_message_id}] {who} (голосовым): {stripped}"
+                f"  [id={r.tg_message_id}{reply_marker}] {who} (голосовым): {stripped}"
             )
         else:
-            lines.append(f"  [id={r.tg_message_id}] {who}: {text}")
+            lines.append(
+                f"  [id={r.tg_message_id}{reply_marker}] {who}: {text}"
+            )
     if not lines:
         return ""
-    return "# Контекст чата (последние сообщения)\n" + "\n".join(lines)
+    header = (
+        "# Контекст чата (последние сообщения)\n"
+        "Маркер `↩reply_to=N` означает что юзер использовал Telegram-Reply\n"
+        "на сообщение `[id=N]`. Это ЖЁСТКИЙ якорь контекста — когда видишь\n"
+        "местоимения «его / её / этот / эту / их / тот» в сообщении с\n"
+        "reply_to, перейди к сообщению-родителю и оттуда вытащи объект,\n"
+        "к которому относится местоимение. Не отвечай «кого именно?» —\n"
+        "ответ в parent-сообщении.\n"
+    )
+    return header + "\n".join(lines)
 
 
 VOICE_TRANSCRIBE_CATCHUP_MIN = 10

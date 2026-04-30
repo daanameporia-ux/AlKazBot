@@ -59,6 +59,11 @@ class MessageLoggingMiddleware(BaseMiddleware):
                 ),
                 is_bot=bool(msg.from_user.is_bot) if msg.from_user else False,
                 is_mention=False,  # set later in handler once we know
+                reply_to_tg_message_id=(
+                    msg.reply_to_message.message_id
+                    if msg.reply_to_message is not None
+                    else None
+                ),
             )
             session.add(entry)
 

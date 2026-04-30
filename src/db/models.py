@@ -407,6 +407,7 @@ class MessageLog(Base):
     is_bot: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_mention: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     intent_detected: Mapped[str | None] = mapped_column(Text)
+    reply_to_tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
