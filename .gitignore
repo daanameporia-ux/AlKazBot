@@ -37,3 +37,4 @@ node_modules/
 # (uv.lock is intentionally tracked so Railway builds are reproducible)
 .scratch/
 *.pdf
+.claude/
