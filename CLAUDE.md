@@ -69,6 +69,12 @@ source scripts/load-secrets.sh  # if you've stashed it, else pull from Railway e
 - **PDF auto-parse requires all three**: explicit user request
   (`has_explicit_ingest_request`), document-is-ours heuristic,
   confidence ≥ 0.8. See `src/core/pdf_ingest.py::SBER_HINT`.
+- **Math-honesty mandate.** Если арифметика владельца / Арбуза /
+  Казаха не сходится (`33 − 5 = 27` и т.п.) — НЕ соглашайся, НЕ
+  записывай, НЕ «помечай расхождение в notes». Сразу скажи прямо
+  «X − Y = Z, а не W» и жди подтверждения. Авторитет юзера не
+  отменяет арифметику. Следи за единицами (₽ vs тыс ₽). Полные
+  правила и история инцидента — `инструкции/МАТЕМАТИКА.md`.
 
 ## Where to read up when you're new
 
