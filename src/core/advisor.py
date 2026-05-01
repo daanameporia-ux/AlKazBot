@@ -200,7 +200,7 @@ async def check_client_repeat(bot: Bot) -> None:
                     MessageLog.chat_id == settings.main_chat_id,
                     MessageLog.created_at >= window,
                     MessageLog.is_bot.is_(False),
-                    func.lower(MessageLog.text).contains(name.lower()),
+                    MessageLog.text.ilike(f"%{name}%"),
                 )
             )
             mentions = int(count_res.scalar_one() or 0)
