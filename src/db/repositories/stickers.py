@@ -187,6 +187,7 @@ async def described_catalog(
     *,
     per_pack: int = 20,
     pack_limit: int = 10,
+    min_usage: int = 0,
 ) -> list[tuple[str, str | None, list[tuple[str, str, str]]]]:
     """Per-pack catalog with Vision descriptions.
 
@@ -215,6 +216,7 @@ async def described_catalog(
         .where(
             SeenSticker.sticker_set.isnot(None),
             SeenSticker.description.isnot(None),
+            SeenSticker.usage_count >= min_usage,
         )
         .order_by(SeenSticker.id.asc())
     )

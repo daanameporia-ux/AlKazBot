@@ -378,6 +378,10 @@ class KnowledgeBase(Base):
     last_used: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     usage_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # always_inject — грузить ли в кэшируемый system block каждый запрос.
+    # FALSE = подтягивать lazy через kb_repo.search() когда триггер из батча
+    # совпадает с key/content. См. alembic 0024.
+    always_inject: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
 
 

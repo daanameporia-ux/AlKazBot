@@ -558,8 +558,12 @@ async def _collect_sticker_context() -> tuple[
     """
     async with session_scope() as session:
         packs = await sticker_repo.pack_emoji_summary(session, pack_limit=8)
+        # min_usage=1 → в системный prompt идут только реально юзаные
+        # стикеры. Остальные 450+ Vision-описаний не грузим в кэш —
+        # экономит ~12k tokens cached. Новые стикеры подтянутся как
+        # только команда впервые их пошлёт (usage_count перестаёт быть 0).
         catalog = await sticker_repo.described_catalog(
-            session, per_pack=12, pack_limit=6
+            session, per_pack=12, pack_limit=6, min_usage=1
         )
         rows = await sticker_repo.recent_usage_examples(
             session, limit=8, humans_only=True
@@ -574,6 +578,34 @@ async def _collect_sticker_context() -> tuple[
         for r in rows
     ]
     return packs, catalog, examples
+
+
+async def _lazy_kb_for_batch(rendered: str) -> list[dict[str, Any]]:
+    """Find KB facts whose key/content overlaps with the current batch text.
+
+    These are non-kernel facts (always_inject=false) that we only want
+    in the prompt when actually relevant — e.g. «карен-pack-balance-2»
+    when the batch mentions Карен. Loaded into uncached tail to avoid
+    cache-write costs for every справочный fact in the DB.
+    """
+    from src.db.repositories import knowledge as kb_repo
+
+    if not rendered:
+        return []
+    async with session_scope() as session:
+        rows = await kb_repo.lookup_for_text(
+            session, rendered, limit=10, min_confidence="inferred"
+        )
+    return [
+        {
+            "id": r.id,
+            "category": r.category,
+            "key": r.key,
+            "content": r.content,
+            "confidence": r.confidence,
+        }
+        for r in rows
+    ]
 
 
 async def _poa_snapshot() -> str | None:
@@ -872,6 +904,12 @@ async def analyze_batch(
     # from incomplete recent_history.
     poa_snapshot = await _poa_snapshot() if _needs_poa_snapshot(rendered) else None
 
+    # Lazy KB facts: pull only the справочные records whose key/content
+    # actually matches the current batch text. Cached KB block holds only
+    # the kernel set (always_inject=true) — see kb_repo.list_facts(only_kernel)
+    # and the 0024 migration for context.
+    lazy_kb = await _lazy_kb_for_batch(rendered)
+
     # `recent_history` is the non-cached last system block — it changes every
     # request, so we keep the cached sections ahead of it.
     system_blocks = build_system_blocks(
@@ -881,6 +919,7 @@ async def analyze_batch(
         sticker_described_catalog=sticker_catalog,
         sticker_usage_examples=sticker_examples,
         poa_snapshot=poa_snapshot,
+        lazy_kb_facts=lazy_kb,
         recent_messages=recent_history or None,
         analyzer_instructions=BATCH_INSTRUCTION,
     )

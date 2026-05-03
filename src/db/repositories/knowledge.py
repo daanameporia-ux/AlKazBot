@@ -125,14 +125,87 @@ async def list_facts(
     min_confidence: str = "tentative",
     category: str | None = None,
     limit: int | None = None,
+    only_kernel: bool = False,
 ) -> list[KnowledgeBase]:
+    """List active KB facts.
+
+    `only_kernel=True` filters to `always_inject=true` rows — the small
+    set of canonical rules/aliases that go into the cached system prompt
+    every call. The rest are loaded lazily via :func:`lookup_for_text`.
+    """
     threshold = CONFIDENCE_ORDER[min_confidence]
     stmt = select(KnowledgeBase).where(KnowledgeBase.is_active.is_(True))
+    if only_kernel:
+        stmt = stmt.where(KnowledgeBase.always_inject.is_(True))
     if category:
         stmt = stmt.where(KnowledgeBase.category == category)
     stmt = stmt.order_by(KnowledgeBase.category, KnowledgeBase.id)
     rows = list((await session.execute(stmt)).scalars().all())
     return [f for f in rows if CONFIDENCE_ORDER[f.confidence] >= threshold][: limit or None]
+
+
+async def lookup_for_text(
+    session: AsyncSession,
+    text: str,
+    *,
+    limit: int = 12,
+    min_confidence: str = "inferred",
+) -> list[KnowledgeBase]:
+    """Lazy-load: find non-kernel KB facts whose key/content overlaps with
+    the given batch text. Used to inject relevant справочные facts into
+    the uncached prompt tail without paying for them in cache writes.
+
+    Match is by key substring OR significant content-word overlap.
+    Skips rows with `always_inject=true` — they're already in the
+    cached kernel block and would just duplicate.
+    """
+    if not text or not text.strip():
+        return []
+    lo = text.lower()
+
+    threshold = CONFIDENCE_ORDER[min_confidence]
+    stmt = (
+        select(KnowledgeBase)
+        .where(
+            KnowledgeBase.is_active.is_(True),
+            KnowledgeBase.always_inject.is_(False),
+        )
+        .order_by(KnowledgeBase.id.desc())
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+
+    hits: list[KnowledgeBase] = []
+    for r in rows:
+        if CONFIDENCE_ORDER[r.confidence] < threshold:
+            continue
+        # Match if key (whole word) appears in batch OR any 4+ char token
+        # from key appears, OR a notable noun from content appears.
+        matched = False
+        if r.key:
+            klow = r.key.lower()
+            if klow in lo:
+                matched = True
+            else:
+                for tok in klow.replace("-", " ").replace("_", " ").split():
+                    if len(tok) >= 4 and tok in lo:
+                        matched = True
+                        break
+        if not matched:
+            # Content-side: pick capitalised words (likely names/entities).
+            for tok in r.content.split():
+                stripped = tok.strip(".,;:()[]{}«»\"'!?")
+                if (
+                    len(stripped) >= 4
+                    and stripped[0].isupper()
+                    and stripped.lower() in lo
+                ):
+                    matched = True
+                    break
+        if matched:
+            hits.append(r)
+            if len(hits) >= limit:
+                break
+    return hits
 
 
 async def search(

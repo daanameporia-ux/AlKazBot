@@ -157,14 +157,18 @@ confirm_keyboard = _confirm_kb
 async def _load_kb_items() -> list[dict]:
     """Load all active KB facts above `inferred` confidence.
 
-    We used to always dump everything. As the KB grows past ~200 facts the
-    prompt balloons; when that becomes painful, wire in intent-aware
-    filtering by passing the trigger text into this function and
-    pre-selecting categories. For now, 30-60 facts still comfortably fits
-    inside the cached system block.
+    Tiered loading (since 2026-05-03):
+      • kernel set (`always_inject=true`): canonical rules / aliases — pulled
+        every call, lives in the cached system block.
+      • остальное: лежит в БД, грузится lazy через `lookup_for_text` в
+        uncached хвост — только когда триггер из батча реально совпал.
+
+    Это срезало cached system prompt с ~25k до ~5-7k tokens.
     """
     async with session_scope() as session:
-        facts = await kb_repo.list_facts(session, min_confidence="inferred")
+        facts = await kb_repo.list_facts(
+            session, min_confidence="inferred", only_kernel=True
+        )
     return [
         {
             "id": f.id,
