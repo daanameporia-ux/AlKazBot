@@ -605,6 +605,7 @@ async def _poa_snapshot() -> str | None:
         return None
     sections = {
         "has_balance": ("💰 Баланс есть, не сняли", []),
+        "on_hold": ("⏸ Проблемные (паспорт/блок — отложили)", []),
         "withdrawn": ("✅ Сняли", []),
         "no_balance": ("0️⃣ Пусто", []),
         "not_found": ("❌ Ненаход", []),
@@ -632,7 +633,7 @@ async def _poa_snapshot() -> str | None:
         "client_balance_history. Если юзер спросит про статусы клиентов — "
         "отвечай отсюда, развёрнуто и по-человечески, не отсылай на /balances."
     )
-    for code in ("has_balance", "withdrawn", "no_balance", "not_found", "unchecked"):
+    for code in ("has_balance", "on_hold", "withdrawn", "no_balance", "not_found", "unchecked"):
         title, lines = sections[code]
         if not lines:
             continue
