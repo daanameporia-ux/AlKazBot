@@ -103,11 +103,7 @@ ANALYZE_TOOL = {
                         "source_message_ids": {
                             "type": "array",
                             "items": {"type": "integer"},
-                            "description": (
-                                "tg_message_id values from the batch that "
-                                "this operation is based on. Include the "
-                                "ids you used so the bot can cite them."
-                            ),
+                            "description": "tg_message_id-ы из батча, на которых эта операция.",
                         },
                         "summary": {
                             "type": "string",
@@ -116,65 +112,41 @@ ANALYZE_TOOL = {
                         "fields": {
                             "type": "object",
                             "description": (
-                                "Intent-specific fields. Examples:\n"
+                                # Только сигнатуры полей. Семантика, разница «balance vs withdrawal»,
+                                # «in_use vs worked_out», категории knowledge_teach, паттерны
+                                # partner_contribution — всё в BATCH_INSTRUCTION (analyzer_instructions
+                                # подклеен к CORE). Раньше всё дублировалось здесь и в инструкции —
+                                # это +1.4k tokens cached без надобности.
+                                "Intent-specific fields:\n"
                                 "exchange: {amount_rub, amount_usdt, fx_rate}\n"
                                 "expense: {category, amount_rub?, amount_usdt?, description}\n"
                                 "partner_withdrawal: {partner, amount_usdt, from_wallet?}\n"
                                 "partner_deposit: {partner, amount_usdt}\n"
-                                "  partner_deposit фиксирует ТЕКУЩЕЕ перемещение USDT внутри оборотки (партнёр пополнил рабочий кошелёк).\n"
-                                "partner_contribution: {partner, amount_usdt, source?:('initial_depo'|'manual'|'poa_share'), notes?}\n"
-                                "  Используй для УЧЁТНЫХ пополнений капитала партнёра в оборотку. Реальные паттерны:\n"
-                                "    «Казах додеп 596 USDT в оборотку», «1500 USDT initial»,\n"
-                                "    «закинул 100 USDT на Tap», «мой стартовый депо был 3600».\n"
-                                "  source=initial_depo для самого первого депо партнёра, manual — для довносов.\n"
-                                "  Пишет в `partner_contributions` (не в partner_deposit, который про текущие движения!).\n"
-
-                                "poa_withdrawal: {client_name, amount_rub, partner_shares:[{partner,pct}], client_share_pct}\n"
-                                "  ⚠️ ТОЛЬКО когда есть ЯВНЫЙ глагол снятия: «снял/сняли/вытащили/забрали/снято/окэшил».\n"
-                                "  Без глагола — это НЕ снятие. См. правило balance vs withdrawal ниже.\n"
-                                "client_balance: {client_name, amount_rub, source?:('card'|'sber_account'|'unknown'), description?}\n"
-                                "  Используй когда юзер сообщает ТЕКУЩИЙ остаток у POA-клиента БЕЗ упоминания снятия:\n"
-                                "    «Аймурат 62к карта», «Мицкевич 54000 баланс», «Баскова 50346», «Войтик пусто»,\n"
-                                "    «Байкалов Сергей пусто», «X не найден», «X ненаход».\n"
-                                "  amount_rub=0 для «пусто/ненаход». source: card/sber_account если упомянуто.\n"
-                                "  Это просто ОТЧЁТ О БАЛАНСЕ, не операция с деньгами. Партнёрские доли НЕ считаем.\n"
-
+                                "partner_contribution: {partner, amount_usdt,"
+                                " source?:('initial_depo'|'manual'|'poa_share'), notes?}\n"
+                                "poa_withdrawal: {client_name, amount_rub,"
+                                " partner_shares:[{partner,pct}], client_share_pct}\n"
+                                "client_balance: {client_name, amount_rub,"
+                                " source?:('card'|'sber_account'|'unknown'), description?}\n"
                                 "cabinet_purchase: {name?, cost_rub, prepayment_ref?}\n"
-                                "cabinet_in_use: {name_or_code}  — «ставим в работу», in_stock→in_use\n"
-                                "cabinet_worked_out: {name_or_code}  — «отработал» / «выебан», in_use→worked_out\n"
+                                "cabinet_in_use: {name_or_code}\n"
+                                "cabinet_worked_out: {name_or_code}\n"
                                 "cabinet_blocked: {name_or_code}\n"
                                 "cabinet_doverka_received: {name_or_code}\n"
-                                "  Используй когда юзер сообщает что Карен (или другой поставщик) ДОВЁЗ доверенность на кабинет, который раньше был «без доверки» на складе. Реальные паттерны: «Куджба алхас довез доверку», «Габлая Лоида — доверка получена», «довезли доверку на X».\n"
-                                "  Применяет cabinets.has_doverka=true и пересчитывает стоимость в /report по полной (28к) вместо средней по предоплате.\n"
-
                                 "prepayment_given: {supplier, amount_rub, expected_cabinets?}\n"
                                 "prepayment_fulfilled: {supplier, cabinets:[{name,cost_rub}]}\n"
                                 "wallet_snapshot: {tapbank?, mercurio?, rapira?, sber_balances?, cash?}\n"
                                 "client_payout: {client_name, amount_usdt}\n"
-                                "knowledge_teach: {category: 'alias'|'glossary'|'entity'|'rule'|'pattern'|'preference', key?, content}\n"
-                                "  - alias: key=короткая форма, content=канон (\"Арнелле\" → acquiring)\n"
-                                "  - entity: key=имя, content=описание (клиент, поставщик)\n"
-                                "  - rule: content=правило бизнеса\n"
-                                "  - glossary: key=термин, content=значение\n"
-                                "  - pattern: content=типовая формулировка\n"
-                                "  - preference: content=как юзер хочет чтобы бот работал\n"
-                                "  Можно возвращать НЕСКОЛЬКО knowledge_teach в одном batch если юзер накинул несколько фактов.\n"
-                                "wakeword_add: {word: str}\n"
-                                "  Когда юзер просит реагировать на новое слово: «откликайся на пёс», "
-                                "«зови меня так-то», «добавь «шавка» в триггеры». Клади чистое слово "
-                                "(в нижнем регистре, без кавычек, без лишних пробелов). Бот одновременно "
-                                "положит его в trigger_keywords и в knowledge_base как preference.\n"
-                                "  НЕ используй wakeword_add для случайных кличек в разговоре — только "
-                                "когда юзер явно формулирует «откликайся / реагируй / зови / добавь в триггеры»."
+                                "knowledge_teach: {category, key?, content}\n"
+                                "wakeword_add: {word: str}"
                             ),
                         },
                         "ambiguities": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Things you were unsure about. The bot will "
-                                "ask the user before persisting if this is "
-                                "non-empty OR if confidence < 0.7."
+                                "Что неясно. Бот спросит юзера перед записью "
+                                "если non-empty ИЛИ confidence<0.7."
                             ),
                         },
                     },
@@ -188,54 +160,29 @@ ANALYZE_TOOL = {
             "chat_reply": {
                 "type": "string",
                 "description": (
-                    "Free-text Russian reply to send back to the chat. "
-                    "Required when chat_only=true AND the batch includes a "
-                    "trigger message (a direct @-mention, a reply to the "
-                    "bot, or a question). Must follow the personality/tone "
-                    "spec. Leave empty when there's no trigger (passive "
-                    "analysis should stay silent unless there are operations)."
+                    "Russian reply to chat. Required iff chat_only=true И в "
+                    "батче есть trigger. Без триггера — пустая строка."
                 ),
             },
             "sticker_emoji": {
                 "type": "string",
-                "description": (
-                    "Optional emoji label to narrow sticker pick. Matches "
-                    "exactly (with variation-selector/ZWJ stripping). Pick "
-                    "from the spectrum listed in the 'Стикеры' system "
-                    "block."
-                ),
+                "description": "Emoji to narrow sticker pick (см. блок Стикеры).",
             },
             "sticker_description_hint": {
                 "type": "string",
                 "description": (
-                    "Optional free-text substring matched (case-insensitive, "
-                    "ILIKE '%...%') against the Vision-generated "
-                    "`description` column of `seen_stickers`. The field is "
-                    "Russian, so send a Russian noun/verb (e.g. 'офис', "
-                    "'деньги', 'устал', 'кот', 'мешок'). Combine with "
-                    "`sticker_emoji` for narrower picks or use alone when "
-                    "no obvious emoji fits the mood. Read the '## Каталог "
-                    "по сюжету' section of the 'Стикеры' block to see what "
-                    "descriptions are available."
+                    "Russian noun/verb для substring-match по Vision-описанию "
+                    "(ILIKE '%X%'). Примеры: 'офис', 'деньги', 'устал', 'кот'."
                 ),
             },
             "sticker_pack_hint": {
                 "type": "string",
-                "description": (
-                    "Optional substring of a pack name to restrict the "
-                    "pick to a specific pack (e.g. 'kontorapidarasov'). "
-                    "Use when you specifically want the feel of one pack."
-                ),
+                "description": "Substring имени пака (e.g. 'kontorapidarasov').",
             },
             "sticker_theme_hint": {
                 "type": "string",
                 "description": (
-                    "Optional thematic label matching `seen_stickers.pack_theme` "
-                    "exactly (case-insensitive). Known themes: 'сбер-мем' "
-                    "(пак kontorapidarasov — всё про Сбер). Use when user "
-                    "asks for a sticker on a theme that matches the whole "
-                    "pack, not just one sticker. See '## Каталог по сюжету' "
-                    "above for which packs carry a theme."
+                    "Точная label из seen_stickers.pack_theme. Known: 'сбер-мем'."
                 ),
             },
             "notes": {
