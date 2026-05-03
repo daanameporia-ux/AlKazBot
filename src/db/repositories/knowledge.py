@@ -148,7 +148,7 @@ async def lookup_for_text(
     session: AsyncSession,
     text: str,
     *,
-    limit: int = 12,
+    limit: int = 5,
     min_confidence: str = "inferred",
 ) -> list[KnowledgeBase]:
     """Lazy-load: find non-kernel KB facts whose key/content overlaps with
@@ -158,6 +158,11 @@ async def lookup_for_text(
     Match is by key substring OR significant content-word overlap.
     Skips rows with `always_inject=true` — they're already in the
     cached kernel block and would just duplicate.
+
+    Default limit=5 (down from 12): на нашей текущей KB (50 lazy-фактов)
+    хвост в 5 матчей покрывает >95% запросов; больше — переплата токенов
+    в uncached блок. Сортировка по usage_count DESC даёт топ-5 самых
+    проверенных, а не самых свежих.
     """
     if not text or not text.strip():
         return []
@@ -170,7 +175,7 @@ async def lookup_for_text(
             KnowledgeBase.is_active.is_(True),
             KnowledgeBase.always_inject.is_(False),
         )
-        .order_by(KnowledgeBase.id.desc())
+        .order_by(KnowledgeBase.usage_count.desc(), KnowledgeBase.id.desc())
     )
     rows = list((await session.execute(stmt)).scalars().all())
 

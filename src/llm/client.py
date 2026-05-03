@@ -95,12 +95,18 @@ async def complete(
     temperature: float = 0.3,
     tools: list[dict[str, Any]] | None = None,
     tool_choice: dict[str, Any] | None = None,
+    call_kind: str = "unknown",
 ) -> LLMResponse:
     """Low-level call to Anthropic `messages.create`.
 
     `system_blocks` is the pre-assembled list of system text blocks — callers
     (e.g. `src.llm.system_prompt`) are responsible for adding
     `cache_control={"type":"ephemeral"}` on the right blocks.
+
+    `call_kind` is a free-form tag that goes into `llm_call` structured log
+    so that we can attribute spend to its source (`batch_analyzer`,
+    `classifier`, `free_text`, `vision`, etc.). Use the same string across
+    all call-sites of the same logical caller.
     """
     client = get_client()
     target_model = model or settings.anthropic_model
@@ -127,13 +133,37 @@ async def complete(
             break
 
     usage = resp.usage
+    in_tok = getattr(usage, "input_tokens", 0) or 0
+    out_tok = getattr(usage, "output_tokens", 0) or 0
+    cw_tok = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cr_tok = getattr(usage, "cache_read_input_tokens", 0) or 0
+
+    # Single source-of-truth log for spend attribution. Aggregator can
+    # group by (model, call_kind) and multiply by per-token rates.
+    # Don't log batch_analyzer separately — it has its own richer log
+    # downstream; centralized here only for non-batch callers (classifier,
+    # free_text, vision) so they're not invisible in usage charts.
+    if call_kind != "batch_analyzer":
+        log.info(
+            "llm_call",
+            model=resp.model,
+            call_kind=call_kind,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_write_tokens=cw_tok,
+            cache_read_tokens=cr_tok,
+            has_tools=tools is not None,
+            max_tokens=max_tokens,
+            stop_reason=resp.stop_reason,
+        )
+
     return LLMResponse(
         text=text,
         model=resp.model,
         stop_reason=resp.stop_reason,
-        input_tokens=getattr(usage, "input_tokens", 0) or 0,
-        output_tokens=getattr(usage, "output_tokens", 0) or 0,
-        cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
-        cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        cache_creation_input_tokens=cw_tok,
+        cache_read_input_tokens=cr_tok,
         raw=resp,
     )

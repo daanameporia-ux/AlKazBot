@@ -30,8 +30,13 @@ class PipelineResult:
 
 
 async def _load_kb_items() -> list[dict]:
+    # only_kernel=True: согласовано с batch_processor — для не-batch путей
+    # тоже грузим только always_inject, остальное достанется через
+    # kb_repo.lookup_for_text если когда-нибудь подключим lazy-инжект.
     async with session_scope() as session:
-        facts = await kb_repo.list_facts(session, min_confidence="inferred")
+        facts = await kb_repo.list_facts(
+            session, min_confidence="inferred", only_kernel=True
+        )
     return [
         {
             "id": f.id,
@@ -45,13 +50,21 @@ async def _load_kb_items() -> list[dict]:
 
 
 async def answer_free_text(message_text: str, *, knowledge_items: list[dict]) -> str:
-    """LLM free-form reply for `QUESTION` / `CHAT` / `UNCLEAR` intents."""
+    """LLM free-form reply for `QUESTION` / `CHAT` / `UNCLEAR` intents.
+
+    Использует Haiku (fallback model) — chat-reply на простой вопрос
+    не требует Sonnet'а, экономит 3x на input/output.
+    """
+    from src.config import settings as _settings
+
     system_blocks = build_system_blocks(knowledge_items=knowledge_items)
     resp = await complete(
         system_blocks=system_blocks,
         messages=[{"role": "user", "content": message_text}],
+        model=_settings.anthropic_fallback_model,
         max_tokens=600,
         temperature=0.6,
+        call_kind="free_text",
     )
     return resp.text.strip() or "…"
 

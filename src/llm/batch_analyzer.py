@@ -251,233 +251,96 @@ ANALYZE_TOOL = {
 BATCH_INSTRUCTION = """\
 # Batch analysis task
 
-Ты получаешь список сообщений из группы команды АлКаз. Каждая строка
-это Telegram-`id`, автор, текст. Батч может содержать: операции,
-болтовню, вопрос боту, команду «запомни», или смесь.
+Ты получаешь список сообщений из группы. `[trigger message (...)]` —
+текущий запрос. Обычные `[id=...]` — пассивный контекст.
 
-Структура:
-- `[trigger message (...)]` — сообщение-триггер (mention / reply /
-  keyword / command / document / voice_keyword). Это «текущий запрос»
-  юзера.
-- Обычные `[id=...]` — пассивный контекст перед триггером.
+Для каждой операции верни `BatchOperation`: intent (enum),
+source_message_ids, summary (одна строка), fields (см. schema),
+ambiguities (вопросы перед записью), confidence (понижай на сомнении).
 
-Для каждой операции верни `BatchOperation`:
-- `intent` из enum
-- `confidence` (понижай на любой неоднозначности)
-- `source_message_ids` — id сообщений, из которых эта операция
-- `summary` — одна строка на русском для preview
-- `fields` — структура под intent (см. tool schema)
-- `ambiguities` — вопросы, которые надо задать перед записью
+Поиск операций в свободной речи и общие правила тона/честности — см.
+CORE_INSTRUCTIONS блок «Поиск операций» и «Жёсткие правила». Здесь —
+только batch-специфичные нюансы.
 
-## Ищи операции в свободной речи
+## Cabinet «в работу» vs «отработал» — критично
 
-Команда редко пишет формально. Реальные примеры:
-- `[voice] сняли сегодня с Никонова полтос, мне 20 Арбузу 15` →
-  POA_WITHDRAWAL (client="Никонов", amount_rub=50000, client_share_pct=65,
-  partner_shares=[{{Казах,20}}, {{Арбуз,15}}]).
-- `280к на 3480 по 80.46` → EXCHANGE.
-- `отдал Мише 80 за четыре` → PREPAYMENT_GIVEN (supplier="Миша",
-  amount_rub=80000, expected_cabinets=4).
-- `за весь этот шлак 261к суммарно заплатили` → PREPAYMENT_GIVEN
-  (supplier=поставщик из контекста, amount_rub=261000, expected_cabinets
-  из списка если есть). «Шлак» / «пачка» / «партия» = кучка кабинетов.
-- `эквайринг сегодня 5к` → EXPENSE category=acquiring.
-- `завтра в работу 4. Даут, 10. Анатолий` → 2× CABINET_IN_USE
-  (поштучно, в preview-карточки с именами).
-- `кабинет Серго отработан` → CABINET_WORKED_OUT.
-- `выебан кабинет Аляс` / `выебали Даута` → CABINET_WORKED_OUT
-  («выебан» на сленге команды = отработан, списан со склада).
+  * «в работу / запускаю / ставим» → `cabinet_in_use` (in_stock→in_use)
+  * «отработан / выебан / списываем» → `cabinet_worked_out` (in_use→worked_out)
 
-## Различие «в работу» vs «отработал» — ВАЖНО
+Живой баг: «завтра в работу Даут» парсилось как worked_out. Не путай.
 
-Это два разных статуса, и их легко спутать:
+## POA-снятие vs БАЛАНС клиента — критично
 
-  * **«Поставил/ставим в работу»** / «в работу сегодня» / «запускаю» →
-    `cabinet_in_use` (статус in_stock → in_use). Кабинет НАЧИНАЕТ цикл.
-  * **«Отработал»** / «выебан» / «выебали» / «списываем» →
-    `cabinet_worked_out` (статус in_use → worked_out). Кабинет
-    ЗАКОНЧИЛ цикл, списывается со склада.
+Самый частый косяк. Различие:
 
-Если юзер говорит «кабинет X в работу» — НЕ ставь `cabinet_worked_out`.
-Это был живой баг: бот распарсил «завтра в работу Даут» как
-worked_out и юзер получил 2 неправильные preview-карточки.
+**`poa_withdrawal`** требует ЯВНЫЙ глагол снятия («снял/вытащили/
+забрали/окэшил») И все 4 поля (client_name, amount_rub,
+client_share_pct, partner_shares) — иначе applier падает. ВРЕМЕННО
+доли НЕ нужны (см. KB rule `shares-disabled-temp` — грузится в kernel).
 
-## Различие POA-снятие vs БАЛАНС клиента — КРИТИЧНО
+**`client_balance`** = просто отчёт остатка БЕЗ глагола снятия:
+  - `Аймурат 62к карта` / `Баскова 50346` → balance
+  - `Войтик пусто` → balance amount_rub=0
+  - `Вакальчук ненаход` → balance amount_rub=0, description='ненаход'
 
-Это **самый частый косяк бота** (29.04 он 5 раз подряд ошибся).
+Нет глагола снятия → НИКОГДА не делай poa_withdrawal. Сомневаешься
+— делай `client_balance` (мягкий путь).
 
-**`poa_withdrawal`** = реальное снятие денег с POA-счёта клиента, ТРЕБУЕТ:
-  - явный глагол снятия: «снял/сняли/вытащили/забрали/снято/окэшил/окешил»
-  - и/или явный контекст «давай записывай снятие», «проводим снятие»
-  - И ОБЯЗАТЕЛЬНО все 4 поля: `client_name`, `amount_rub`, `client_share_pct`,
-    `partner_shares` (без них applier валится — не плоди эти карточки без полных данных).
+## НЕ операции
 
-**`client_balance`** = ОТЧЁТ о текущем остатке у клиента (НЕ операция).
-Используется когда юзер просто **сообщает баланс** на счёте клиента,
-БЕЗ упоминания самого факта снятия. Реальные паттерны:
+  * Входящие СБП на наш Сбер от физиков — НЕ отдельная операция.
+    Учитываются через wallet_snapshot одной строкой в /report.
+  * Скрины СМС, экран «банк напомнил пароль» — не плоди preview без
+    явного «запиши/внеси».
 
-  - `Аймурат 62к карта` → balance, не withdrawal
-  - `Мицкевич Сергей 54000` → balance
-  - `Баскова 50346 ₽` → balance
-  - `Войтик пусто` / `Байкалов Сергей пусто` → balance amount_rub=0
-  - `Вакальчук ненаход` / `Король ненаход клиента` → balance amount_rub=0
-    + description='ненаход'
-  - `Мансуров 15.5` (на следующей строке «баланс это» / без глагола) → balance
+Без явного «запиши» — если батч про деньги/инвентарь и confidence>=0.75,
+делай preview. Юзер ✅/❌. Нет числа — `ambiguities`+confidence<0.7.
 
-ЯВНОЕ УКАЗАНИЕ: юзеры в чате прямо говорили «**пока просто записывай балансы
-каждому, дальше после снятия уже будем доли считать**». То есть когда идёт
-проход по списку POA-клиентов с проверкой остатков — это batch балансов,
-не снятий.
+## chat_reply / молчание
 
-Если в строке нет ни одного снятия-глагола — НИ В КОЕМ СЛУЧАЕ не делай
-poa_withdrawal. Делай `client_balance` или `knowledge_teach` с category=entity.
+Триггер есть, операций нет → `chat_only=true` + `chat_reply`. Триггера
+нет и операций нет → `chat_only=true`, пустой reply, молчишь.
 
-Сомневаешься — `client_balance` (мягкий путь, ничего не сломает) лучше
-чем `poa_withdrawal` (если applier не получит полные поля — попап ошибки
-у юзера в TG, и данные потеряны).
+## Вложения (фото/PDF)
 
-## Что НЕ операция — не плоди карточки
+Если в prompt есть `# Вложения по текущему запросу` — там фото
+(image-block) или PDF-текст с `SBER_HINT`/`ALIEN_PDF_HINT`.
 
-  * **Входящие клиентские платежи на Сбер-счёт** (СБП от физика на
-    наш Сбер, переводы с карты клиента на наш кабинет) — это **не
-    отдельная операция**. Деньги капают на sber_balances, команда
-    учитывает их одной строкой в /report через wallet_snapshot.
-    Если юзер прислал скрин СМС с СБП-поступлением — в chat_reply
-    можешь кратко отметить факт, но `operations=[]`.
-  * **Скрины экранов, фото телефона с СМС, фото «банк напомнил
-    пароль» и т.п.** — не плодь preview. Только если юзер явно
-    попросил занести, действуй как с PDF-политикой.
+Для фото: ATM-чек/expense/exchange/wallet_snapshot — извлекай.
+Мем/селфи → chat_only.
 
-Даже без слов «запиши / внеси» — если батч про деньги/инвентарь и ты
-уверен (confidence ≥ 0.75), делай preview-карточку. Юзер нажмёт ✅/❌,
-ничего не попадёт в базу до подтверждения.
+PDF в операции — только если ВСЕ три: (a) явное «запиши/внеси/
+оформи операции» в сообщении, (b) документ похож на счёт нашей команды
+(ФИО есть в KB), (c) confidence≥0.8. Иначе спроси «это по нашему
+счёту? занести?».
 
-НЕ придумывай числа. Нет amount — конкретный вопрос в `ambiguities`,
-`confidence < 0.7`.
+## Стикеры
 
-## Если триггер есть, а операций нет → chat_reply
+Когда юзер просит «про X» — найди в каталоге описание с X, поставь
+`sticker_description_hint=X` (+`sticker_pack_hint` если пак
+тематически совпадает). НЕ ври про содержимое — если описание есть,
+оно у тебя в кэше.
 
-Поставь `chat_only=true` и напиши ответ в `chat_reply` (русский, в
-нужном тоне — см. PERSONALITY_PROMPT). Это может быть:
-- Ответ на вопрос («сколько было на Rapira?»).
-- Реакция на стикер / эмоцию юзера.
-- Подсказка / совет от бизнес-советника (см. ниже).
+После отправки стикер попадает в recent_history как
+`[sticker <emoji> · <description>]`. Спросят «что скинул» — цитируй
+оттуда, не выдумывай.
 
-Если триггера нет (пассивный батч из буфера) и операций тоже нет —
-`chat_only=true`, `chat_reply` пустой, сиди молча.
+## Teaching
 
-## Фото/PDF — только по явному текущему запросу
+«Запомни: X» / факт о бизнесе → один или несколько `knowledge_teach`.
+Категории и формат — в schema (см. fields description). Несколько
+фактов в одном сообщении → несколько отдельных карточек.
 
-Фото и PDF из чата не читаются автоматически. Если в текущем запросе
-юзер пишет «разбери фото/PDF выше», «глянь скрин», отвечает на файл,
-или прислал файл с @-обращением — в prompt появится блок
-`# Вложения по текущему запросу`:
+## Бизнес-советник
 
-- PDF будет вставлен как текст с `SBER_HINT` или `ALIEN_PDF_HINT`.
-- Фото будет приложено отдельным image-блоком с текстовой меткой
-  `[Фото id=...]`.
+Заметил полезный паттерн (Никонов 3-й раз за день / курс прыгнул /
+кабинет завис 12ч) → вставь одну строку через `💡` в chat_reply.
+Только по делу.
 
-Для фото:
-  * банковский/ATM-чек — извлекай операции только если это реально
-    учётное событие;
-  * чек магазина — expense;
-  * обменник с курсом — exchange;
-  * экран TapBank/Mercurio/Rapira/Sber с остатками — wallet_snapshot;
-  * СМС/СБП-поступление на Сбер — НЕ отдельная операция:
-    `operations=[]`, в `chat_reply` коротко отметь факт.
+## Главное
 
-Если фото мем/селфи/нерелевантное — `chat_only=true` и короткий ответ.
-
-## PDF — ЖЁСТКО БЕЗ АВТОПАРСИНГА
-
-Если во вложениях есть PDF, в текст вписан либо `SBER_HINT`
-(это сбер-выписка), либо `ALIEN_PDF_HINT` (произвольный PDF).
-
-По умолчанию: `operations=[]`, `chat_reply` = короткая сводка.
-**Парсить в операции разрешено только если ВСЕ три условия:**
-
-(a) В этом сообщении или в соседнем есть одно из конкретных
-    слов: «запиши», «внеси», «оформи операции», «занеси в учёт»,
-    «создай wallet_snapshot», «посчитай как операции», «добавь как».
-    Общие «разбери» / «посмотри» / «что скажешь» — НЕ считаются.
-(b) Документ действительно похож на счёт **нашей команды** (а не
-    чужого клиента, не чужого банка). Если в выписке ФИО не из
-    knowledge_base (не партнёры/поставщики/клиенты) — это чужое, не
-    трогаем.
-(c) Confidence ≥ 0.8.
-
-Любое нарушение → `operations=[]`, в `chat_reply` спроси: «это по
-нашему счёту? занести в учёт?».
-
-Подробности разметки сбер-выписки — внутри SBER_HINT.
-
-## Стикеры — без галлюцинаций
-
-Читай описания из блока `# Стикеры` ниже. Когда юзер просит стикер
-«про X»:
-1. Ищешь в «## Каталог по сюжету» описания со словом X.
-2. Ставишь `sticker_description_hint=X` и/или `sticker_pack_hint=...`
-   (если конкретный пак тематически совпадает — например,
-   `kontorapidarasov` = мемы про Сбер).
-3. НЕ утверждай в `chat_reply` что на стикере «логотип Сбера», если
-   ты не проверил по описанию.
-
-После отправки стикер сразу попадает в recent_history как
-`[sticker <emoji> · <description>]`. Если юзер спросит «что за стикер
-скинул?» — ЧИТАЙ recent_history и говори РОВНО то описание, что там.
-Не выдумывай содержимое.
-
-Если ошибся со стикером (не угадал тему) — признай: «не то скинул,
-попробуем ещё раз» и сделай следующую попытку с другим
-description_hint.
-
-## Teaching (`knowledge_teach`)
-
-Когда юзер пишет «запомни: X», «запомни что X» или просто факт о
-бизнесе («Миша 22-28к за кабинет», «Tpay это TapBank», «эквайринг
-5к ежедневно») — разбирай на один или несколько `knowledge_teach`.
-
-Категории:
-- **alias** — два имени одного. `key`=короткая форма,
-  `content`=канон. «Арнелле» → «эквайринг (acquiring)».
-- **entity** — человек / поставщик / клиент. `key`=имя,
-  `content`=описание.
-- **rule** — бизнес-правило, без key.
-- **glossary** — термин → значение.
-- **pattern** — типовая формулировка без key.
-- **preference** — как юзер хочет чтобы бот работал.
-
-Несколько фактов в одном сообщении → несколько отдельных
-`knowledge_teach`, каждый с preview.
-
-Сомнения между категориями / не удалось вытащить key / content →
-`confidence < 0.7` + конкретный вопрос в `ambiguities`.
-
-## Бизнес-советник (опционально, когда уместно)
-
-Смотришь recent_history и текущий батч. Если заметил паттерн, который
-стоит обозначить — вставь в `chat_reply` одну строку через `💡`.
-Примеры:
-- «💡 Никонов уже третий раз за сегодня — POA хочешь создать?»
-- «💡 Курс 85.3 vs прошлый 80.4 — разница 6%, проверь Rapira.»
-- «💡 Два кабинета в работе 12+ часов — отработали или забыли отметить?»
-
-Только по делу, без воды. Если нечего сказать — молчи.
-
-## Honesty
-
-- Не ври про содержимое стикеров (см. выше).
-- Не ври что ты «забыл / убрал из памяти» — у тебя нет такой
-  способности. Корректно: «ок, не пишу в базу» (для pending) или
-  «используй /undo <id>» (для записанного).
-- Не занимайся корпоративной цензурой. У команды свой стиль речи,
-  ты вписываешься.
-
-## Главное правило
-
-Лучше положить карточку с `ambiguities` и `confidence<0.7`, чем
-записать кривую операцию или пропустить реальную. Юзер всегда имеет
-последнее слово — кнопки ✅/❌.
+Лучше карточка с ambiguities+confidence<0.7, чем кривая запись или
+пропуск реальной операции. Юзер имеет последнее слово через ✅/❌.
 """
 
 
@@ -594,7 +457,7 @@ async def _lazy_kb_for_batch(rendered: str) -> list[dict[str, Any]]:
         return []
     async with session_scope() as session:
         rows = await kb_repo.lookup_for_text(
-            session, rendered, limit=10, min_confidence="inferred"
+            session, rendered, limit=5, min_confidence="inferred"
         )
     return [
         {
@@ -608,13 +471,18 @@ async def _lazy_kb_for_batch(rendered: str) -> list[dict[str, Any]]:
     ]
 
 
-async def _poa_snapshot() -> str | None:
-    """Render a fresh snapshot of all POA-clients with status + last balance.
+async def _poa_snapshot(rendered: str = "") -> str | None:
+    """Render a fresh snapshot of POA-clients with status + last balance.
 
-    Injected into the uncached tail of the system prompt every batch call,
-    so the LLM can answer «кого сняли», «у кого баланс», «че по партии»
-    DIRECTLY without reconstructing from chat history (which gives
-    incomplete or hallucinated lists).
+    Modes:
+      • если в `rendered` упомянуты конкретные имена клиентов (substring
+        match по полному имени или фамилии) — рендерим **только** этих
+        клиентов компактным блоком. Экономит ~700 tokens uncached на
+        запросах вида «какой баланс у Семак».
+      • если совпадений нет — рендерим только активные секции
+        (has_balance / on_hold / unchecked). Закрытые (withdrawn /
+        no_balance / not_found) выкидываем, они не нужны для типичных
+        вопросов «че по партии» и режут ~30-40% объёма блока.
     """
     from sqlalchemy import text as _sa_text
 
@@ -635,16 +503,54 @@ async def _poa_snapshot() -> str | None:
         rows = list(res.all())
     if not rows:
         return None
+
+    lo_text = (rendered or "").lower()
+
+    # Mode 1: name-specific. Find which client names appear in batch text.
+    matched_names: set[str] = set()
+    if lo_text:
+        for nm, *_ in rows:
+            # Check full name OR any 4+ char surname token (handles
+            # «Семак» matching "Семак" в "семак 93к", and «Аймурат Думан»
+            # matching either token).
+            full = nm.lower()
+            if full in lo_text:
+                matched_names.add(nm)
+                continue
+            for tok in full.split():
+                tok = tok.strip(".,;:!?«»\"'")
+                if len(tok) >= 4 and tok in lo_text:
+                    matched_names.add(nm)
+                    break
+
+    if matched_names:
+        # Compact block — just the matched clients. Header без preamble:
+        # инструкция «как читать этот блок» уже в CORE_INSTRUCTIONS.
+        parts = ["# POA-клиенты (упомянутые в запросе)"]
+        for nm, status, bal, descr, ts, src in rows:
+            if nm not in matched_names:
+                continue
+            ts_str = ts.strftime("%d.%m") if ts else "—"
+            if bal in (None, 0) and descr:
+                val = descr
+            elif bal in (None, 0):
+                val = "пусто"
+            else:
+                val = f"{int(bal):,}₽".replace(",", " ")
+            src_part = f" [{src}]" if src and src != "unknown" else ""
+            parts.append(f"  • {nm}: {val}{src_part}  [{status}, {ts_str}]")
+        return "\n".join(parts)
+
+    # Mode 2: nothing matched → active sections only.
     sections = {
         "has_balance": ("💰 Баланс есть, не сняли", []),
-        "on_hold": ("⏸ Проблемные (паспорт/блок — отложили)", []),
-        "withdrawn": ("✅ Сняли", []),
-        "no_balance": ("0️⃣ Пусто", []),
-        "not_found": ("❌ Ненаход", []),
+        "on_hold": ("⏸ Проблемные (паспорт/блок)", []),
         "unchecked": ("⏳ Не проверяли", []),
     }
     has_balance_total = 0
     for nm, status, bal, descr, ts, src in rows:
+        if status not in sections:
+            continue
         ts_str = ts.strftime("%d.%m") if ts else "—"
         if bal in (None, 0) and descr:
             val = descr
@@ -655,17 +561,10 @@ async def _poa_snapshot() -> str | None:
             if status == "has_balance":
                 has_balance_total += int(bal)
         src_part = f" [{src}]" if src and src != "unknown" else ""
-        line = f"  • {nm}: {val}{src_part}  ({ts_str})"
-        sections.setdefault(status, (status, []))[1].append(line)
+        sections[status][1].append(f"  • {nm}: {val}{src_part}  ({ts_str})")
 
-    parts = ["# POA-клиенты — актуальный статус из БД (на момент запроса)"]
-    parts.append(
-        "ИСПОЛЬЗУЙ ЭТИ ДАННЫЕ для ответов на «кого сняли / у кого баланс / "
-        "че по партии / какой баланс у X». Это свежий SELECT из clients + "
-        "client_balance_history. Если юзер спросит про статусы клиентов — "
-        "отвечай отсюда, развёрнуто и по-человечески, не отсылай на /balances."
-    )
-    for code in ("has_balance", "on_hold", "withdrawn", "no_balance", "not_found", "unchecked"):
+    parts = ["# POA-клиенты — активные (закрытые см. /balances)"]
+    for code in ("has_balance", "on_hold", "unchecked"):
         title, lines = sections[code]
         if not lines:
             continue
@@ -675,7 +574,7 @@ async def _poa_snapshot() -> str | None:
         parts.append(
             f"\n💰 Сумма ждущих снятия: {has_balance_total:,} ₽".replace(",", " ")
         )
-    return "\n".join(parts)
+    return "\n".join(parts) if len(parts) > 1 else None
 
 
 def _needs_deep_history(batch: Batch, rendered: str) -> bool:
@@ -696,6 +595,25 @@ def _needs_deep_history(batch: Batch, rendered: str) -> bool:
             "о чём",
         )
     )
+
+
+def _needs_sticker_examples(batch: Batch, rendered: str) -> bool:
+    """Decide if uncached sticker_usage_examples block is worth ~570 tokens.
+
+    Yes when:
+      - текущий триггер = sticker (юзер прислал стикер боту);
+      - в батче есть стикеры от людей (бот учится на них);
+      - юзер прямо просит стикер ("кинь стикер", "стикер пж", "ответь стикером");
+      - батч короткий и эмодзи-heavy (вероятно реакция-стикером ожидается).
+    """
+    if batch.trigger_kind == "sticker":
+        return True
+    lo = rendered.lower()
+    if any(t in lo for t in ("стикер", "стик", "кинь стик", "ответь стик")):
+        return True
+    # Detect any sticker placeholder in the rendered batch (means bot has
+    # something to learn from this turn).
+    return "[sticker " in lo or "[стикер " in lo
 
 
 def _needs_poa_snapshot(rendered: str) -> bool:
@@ -776,16 +694,9 @@ async def _recent_history(chat_id: int, exclude_ids: set[int], *, limit: int) ->
             )
     if not lines:
         return ""
-    header = (
-        "# Контекст чата (последние сообщения)\n"
-        "Маркер `↩reply_to=N` означает что юзер использовал Telegram-Reply\n"
-        "на сообщение `[id=N]`. Это ЖЁСТКИЙ якорь контекста — когда видишь\n"
-        "местоимения «его / её / этот / эту / их / тот» в сообщении с\n"
-        "reply_to, перейди к сообщению-родителю и оттуда вытащи объект,\n"
-        "к которому относится местоимение. Не отвечай «кого именно?» —\n"
-        "ответ в parent-сообщении.\n"
-    )
-    return header + "\n".join(lines)
+    # Header сокращён: `↩reply_to` правило теперь в CORE_INSTRUCTIONS
+    # (не дублируем 320 chars в каждый uncached запрос).
+    return "# Контекст чата (последние сообщения)\n" + "\n".join(lines)
 
 
 def _media_history_label(row: MessageLog) -> str:
@@ -890,19 +801,26 @@ async def analyze_batch(
     # Pull a mix of verified examples across the most likely intents.
     few_shot_items = await _collect_few_shot()
 
-    # Sticker library + usage examples so Claude knows which emojis are
-    # actually resolvable, sees Vision descriptions for picking by meaning,
-    # and learns from recent human usage.
+    # Sticker library + usage examples. Library (cached) грузим всегда —
+    # дёшево и без него бот не знает что выбрать. Usage examples
+    # (uncached, ~570 tokens) — только когда батч намекает на стикер-режим
+    # (sticker-only, emoji-heavy reaction, прямая просьба «кинь стикер»).
+    # Раньше грузились на каждый батч включая длинные talky-разборы — пустая трата.
     (
         sticker_packs,
         sticker_catalog,
-        sticker_examples,
+        sticker_examples_full,
     ) = await _collect_sticker_context()
+    sticker_examples = (
+        sticker_examples_full if _needs_sticker_examples(batch, rendered) else None
+    )
 
     # Live POA-clients snapshot — injected into the uncached tail so LLM
     # can answer «кого сняли / у кого баланс» from real DB data, not
     # from incomplete recent_history.
-    poa_snapshot = await _poa_snapshot() if _needs_poa_snapshot(rendered) else None
+    poa_snapshot = (
+        await _poa_snapshot(rendered) if _needs_poa_snapshot(rendered) else None
+    )
 
     # Lazy KB facts: pull only the справочные records whose key/content
     # actually matches the current batch text. Cached KB block holds only
@@ -940,8 +858,9 @@ async def analyze_batch(
         messages=[{"role": "user", "content": user_content}],
         tools=[ANALYZE_TOOL],
         tool_choice={"type": "tool", "name": "analyze_batch"},
-        max_tokens=2500,
+        max_tokens=1500,  # 2500 был запас «на всякий», реальный p99 ответ <1200
         temperature=0.2,
+        call_kind="batch_analyzer",
     )
 
     payload: dict | None = None

@@ -91,15 +91,23 @@ async def llm_classify(
     *,
     knowledge_items: list[dict] | None = None,
 ) -> ClassifiedIntent:
-    """Ask Claude to classify the message into one of the Intent enum values."""
+    """Ask Claude to classify the message into one of the Intent enum values.
+
+    Использует Haiku — простой 23-way enum-роутинг, Sonnet здесь оверкилл
+    (3x дешевле + быстрее на коротких ответах с tool-use).
+    """
+    from src.config import settings as _settings
+
     system_blocks = build_system_blocks(knowledge_items=knowledge_items)
     resp = await complete(
         system_blocks=system_blocks,
         messages=[{"role": "user", "content": text}],
+        model=_settings.anthropic_fallback_model,
         tools=[CLASSIFY_TOOL],
         tool_choice={"type": "tool", "name": "classify_intent"},
         max_tokens=400,
         temperature=0.0,
+        call_kind="classifier",
     )
 
     # Find the tool_use block.
