@@ -190,7 +190,8 @@ class Client(Base):
     __tablename__ = "clients"
     __table_args__ = (
         CheckConstraint(
-            "poa_status IN ('unchecked','has_balance','no_balance','not_found','withdrawn','on_hold')",
+            "poa_status IN ('unchecked','has_balance','no_balance','not_found',"
+            "'withdrawn','on_hold','search_request')",
             name="ck_clients_poa_status",
         ),
     )

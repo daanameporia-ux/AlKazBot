@@ -492,6 +492,7 @@ async def _poa_snapshot(rendered: str = "") -> str | None:
     sections = {
         "has_balance": ("💰 Баланс есть, не сняли", []),
         "on_hold": ("⏸ Проблемные (паспорт/блок)", []),
+        "search_request": ("🔎 Нужно обращение на розыск счёта", []),
         "unchecked": ("⏳ Не проверяли", []),
     }
     has_balance_total = 0
@@ -511,7 +512,7 @@ async def _poa_snapshot(rendered: str = "") -> str | None:
         sections[status][1].append(f"  • {nm}: {val}{src_part}  ({ts_str})")
 
     parts = ["# POA-клиенты — активные (закрытые см. /balances)"]
-    for code in ("has_balance", "on_hold", "unchecked"):
+    for code in ("has_balance", "on_hold", "search_request", "unchecked"):
         title, lines = sections[code]
         if not lines:
             continue
