@@ -489,11 +489,14 @@ async def _poa_snapshot(rendered: str = "") -> str | None:
         return "\n".join(parts)
 
     # Mode 2: nothing matched → active sections only.
+    # ВАЖНО: unchecked — это «надо СЕГОДНЯ пойти в Сбер сверить баланс».
+    # Это активная работа дня, НЕ «потом когда-нибудь». Бот раньше
+    # выкидывал её из ответа на «список на сегодня» (инцидент 04.05).
     sections = {
-        "has_balance": ("💰 Баланс есть, не сняли", []),
-        "on_hold": ("⏸ Проблемные (паспорт/блок)", []),
-        "search_request": ("🔎 Нужно обращение на розыск счёта", []),
-        "unchecked": ("⏳ Не проверяли", []),
+        "has_balance": ("💰 Баланс есть, готовы к снятию", []),
+        "on_hold": ("⏸ Проблемные (паспорт/блок) — на паузе", []),
+        "search_request": ("🔎 Обращение на розыск счёта (написать)", []),
+        "unchecked": ("📋 Сегодня в Сбер — сверить баланс", []),
     }
     has_balance_total = 0
     for nm, status, bal, descr, ts, src in rows:
