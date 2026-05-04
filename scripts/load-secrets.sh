@@ -34,6 +34,7 @@ MAPPING=(
     "anthropic-api-key=ANTHROPIC_API_KEY"
     "telegram-bot-token=TELEGRAM_BOT_TOKEN"
     "prod-database-url=DATABASE_URL"
+    "main-chat-id=MAIN_CHAT_ID"
 )
 
 # Resolve script dir robustly (macOS has no `readlink -f`).
