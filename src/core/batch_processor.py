@@ -12,6 +12,8 @@ Callbacks in `src/bot/handlers/callbacks.py` handle confirm/cancel.
 
 from __future__ import annotations
 
+import re as _re
+
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -154,6 +156,91 @@ def _confirm_kb(uid: str) -> InlineKeyboardMarkup:
 confirm_keyboard = _confirm_kb
 
 
+# --- Strict-trigger guard for client_balance --------------------------- #
+#
+# По распоряжению владельца 04.05.2026: client_balance preview создаётся
+# ТОЛЬКО если в исходных сообщениях рядом с фамилией клиента есть один
+# из 4 паттернов:
+#   (1) фамилия + сумма (число с к/тыс/руб/₽)
+#   (2) фамилия + слово «баланс / остаток / на счету»
+#   (3) фамилия + слово «снят/сняли/снял/снято/окэшил»
+#   (4) фамилия + «пусто / спизжено / ненаход / не нашли / не найден»
+#
+# Голое упоминание имени («а Шидловский?», «Семак настоящую не сделали?»)
+# = НЕ операция. Бот в этом случае может ответить через chat_reply, но
+# НЕ плодит карточку.
+#
+# Если LLM всё равно нагенерил card без паттерна — мы её здесь дропаем.
+
+_AMOUNT_RE = _re.compile(
+    r"\d{1,3}([.,\s]?\d{3})*\s*(к|тыс|руб|рубл|₽|р\.?\b|usdt|\$)",
+    _re.IGNORECASE,
+)
+_BALANCE_WORDS = ("баланс", "остаток", "на счёт", "на счет", "на счету")
+_WITHDRAW_WORDS = (
+    "снят", "сняли", "снял", "снимали", "сняла", "снято",
+    "окэшил", "окешил", "вытащ", "забрали", "забрал",
+)
+_EMPTY_WORDS = ("пусто", "спизжено", "ненаход", "не нашли", "не найден", "не находит")
+
+
+def _client_balance_pattern_ok(op, batch) -> bool:
+    """True if the client_balance op has one of the 4 strict patterns near
+    the client name in the source messages. False = drop the card.
+    """
+    fields = op.fields or {}
+    name = (
+        fields.get("client_name")
+        or fields.get("client")
+        or fields.get("name")
+        or ""
+    )
+    if not name:
+        # If no name field — treat as bad data, drop.
+        return False
+    name_lo = name.lower().split()[0]  # match by first token of full name
+    if len(name_lo) < 3:
+        return False
+
+    # Collect text from all source messages (and trigger if present).
+    texts: list[str] = []
+    if batch.trigger and batch.trigger.text:
+        texts.append(batch.trigger.text)
+    src_ids = set(op.source_message_ids or [])
+    for m in batch.messages:
+        if m.tg_message_id in src_ids and m.text:
+            texts.append(m.text)
+    # Fallback: if no source-message text matched, scan whole batch.
+    if not texts:
+        if batch.trigger and batch.trigger.text:
+            texts.append(batch.trigger.text)
+        for m in batch.messages:
+            if m.text:
+                texts.append(m.text)
+
+    full = "\n".join(texts).lower()
+    if name_lo not in full:
+        # Name not even mentioned in source text — bot hallucinated it.
+        return False
+
+    # Pattern 1: amount near name (within 80 chars window).
+    idx = full.find(name_lo)
+    while idx != -1:
+        window_start = max(0, idx - 80)
+        window_end = min(len(full), idx + len(name_lo) + 80)
+        win = full[window_start:window_end]
+        if _AMOUNT_RE.search(win):
+            return True
+        if any(w in win for w in _BALANCE_WORDS):
+            return True
+        if any(w in win for w in _WITHDRAW_WORDS):
+            return True
+        if any(w in win for w in _EMPTY_WORDS):
+            return True
+        idx = full.find(name_lo, idx + 1)
+    return False
+
+
 async def _load_kb_items() -> list[dict]:
     """Load all active KB facts above `inferred` confidence.
 
@@ -250,6 +337,23 @@ def make_flush_handler(bot: Bot):
         )
 
         for op in analysis.operations:
+            # Strict-trigger guard: client_balance — это НЕ команда «вижу
+            # имя в чате, давай предложу записать». Триггерим карточку
+            # только если рядом с client_name в исходных сообщениях есть
+            # один из 4 паттернов (сумма / баланс / снятие / пусто-ненаход).
+            # Иначе бот плодит карточки на каждое упоминание Семак/Аймурата
+            # в обсуждении (инциденты 04.05).
+            if op.intent.value == "client_balance" and not _client_balance_pattern_ok(
+                op, batch
+            ):
+                log.info(
+                    "client_balance_dropped_no_pattern",
+                    chat_id=batch.chat_id,
+                    fields=op.fields,
+                    summary=op.summary,
+                )
+                continue
+
             # Dedup: if the same operation was already proposed in the
             # last 2 min and is still pending, skip creating a duplicate
             # card. Same user rephrasing the same thing → one card, not
