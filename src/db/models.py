@@ -199,6 +199,9 @@ class Client(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
+    # owner_name — заказчик/поставщик доверки (e.g. «Лол», «Карен»).
+    # Nullable: старые клиенты могут не иметь явного владельца.
+    owner_name: Mapped[str | None] = mapped_column(Text, index=True)
     poa_status: Mapped[str] = mapped_column(
         Text, nullable=False, default="unchecked"
     )
