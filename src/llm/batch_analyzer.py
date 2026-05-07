@@ -437,7 +437,7 @@ async def _poa_snapshot(rendered: str = "") -> str | None:
         res = await session.execute(
             _sa_text(
                 """
-                SELECT c.name, c.poa_status,
+                SELECT c.name, c.poa_status, c.owner_name,
                        (SELECT amount_rub  FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS bal,
                        (SELECT description FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS descr,
                        (SELECT created_at  FROM client_balance_history WHERE client_id=c.id ORDER BY created_at DESC LIMIT 1) AS ts,
@@ -474,7 +474,7 @@ async def _poa_snapshot(rendered: str = "") -> str | None:
         # Compact block — just the matched clients. Header без preamble:
         # инструкция «как читать этот блок» уже в CORE_INSTRUCTIONS.
         parts = ["# POA-клиенты (упомянутые в запросе)"]
-        for nm, status, bal, descr, ts, src in rows:
+        for nm, status, owner, bal, descr, ts, src in rows:
             if nm not in matched_names:
                 continue
             ts_str = ts.strftime("%d.%m") if ts else "—"
@@ -485,7 +485,8 @@ async def _poa_snapshot(rendered: str = "") -> str | None:
             else:
                 val = f"{int(bal):,}₽".replace(",", " ")
             src_part = f" [{src}]" if src and src != "unknown" else ""
-            parts.append(f"  • {nm}: {val}{src_part}  [{status}, {ts_str}]")
+            owner_part = f" · owner={owner}" if owner else ""
+            parts.append(f"  • {nm}: {val}{src_part}{owner_part}  [{status}, {ts_str}]")
         return "\n".join(parts)
 
     # Mode 2: nothing matched → active sections only.
@@ -499,7 +500,7 @@ async def _poa_snapshot(rendered: str = "") -> str | None:
         "unchecked": ("📋 Сегодня в Сбер — сверить баланс", []),
     }
     has_balance_total = 0
-    for nm, status, bal, descr, ts, src in rows:
+    for nm, status, owner, bal, descr, ts, src in rows:
         if status not in sections:
             continue
         ts_str = ts.strftime("%d.%m") if ts else "—"
@@ -512,7 +513,8 @@ async def _poa_snapshot(rendered: str = "") -> str | None:
             if status == "has_balance":
                 has_balance_total += int(bal)
         src_part = f" [{src}]" if src and src != "unknown" else ""
-        sections[status][1].append(f"  • {nm}: {val}{src_part}  ({ts_str})")
+        owner_part = f" · {owner}" if owner else ""
+        sections[status][1].append(f"  • {nm}: {val}{src_part}{owner_part}  ({ts_str})")
 
     parts = ["# POA-клиенты — активные (закрытые см. /balances)"]
     for code in ("has_balance", "on_hold", "search_request", "unchecked"):
