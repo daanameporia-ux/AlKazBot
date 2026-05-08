@@ -40,10 +40,13 @@ async def ack(message: str, *, chat_id: int | None = None) -> int:
         raise ValueError("main_chat_id is 0 — set MAIN_CHAT_ID env var")
     body = f"[manual-db-ack] {message}"
     async with session_scope() as session:
-        # tg_message_id: используем синтетический отрицательный id,
-        # чтобы не пересечься с реальными tg ids (positive ints).
-        # Берём -unix_ts чтобы был уникален.
-        synth_id = -int(datetime.now(UTC).timestamp())
+        # tg_message_id: синтетический id, чтобы не пересечься с реальными
+        # Telegram-id'ами. Раньше было `-unix_ts` (отрицательный), но бот
+        # пытался строить t.me/c/... ссылку на эти записи и она не работала.
+        # Теперь сдвигаем в верхние 9-значные числа: 1_500_000_000 + offset.
+        # Это далеко за пределами реальных Telegram message_id (которые
+        # начинаются с малых чисел в группе) и сразу видно что синтетика.
+        synth_id = 1_500_000_000 + int(datetime.now(UTC).timestamp()) % 100_000_000
         res = await session.execute(
             _sa_text(
                 """
