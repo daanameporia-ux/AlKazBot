@@ -498,6 +498,42 @@ async def _oborotka_snapshot() -> str | None:
                 karen_debt_rub = 0
         karen_debt_usdt = karen_debt_rub / FX_RUB_USDT if karen_debt_rub else 0
 
+        # 6. Внутренние долги между партнёрами (Арбуз → Казаху и т.п.)
+        # Источник — KB-факт id=87 «Арбуз должен Казаху X USDT». Парсим
+        # все строки вида «<имя> должен <имя> X USDT».
+        r = await session.execute(_sa_text(
+            "SELECT id, content FROM knowledge_base WHERE is_active "
+            "AND (content ILIKE '%должен%казах%usdt%' OR content ILIKE '%должен%арбуз%usdt%')"
+        ))
+        internal_debts: list[tuple[str, str, float]] = []  # (debtor, creditor, amount)
+
+        def _normalize_partner(token: str) -> str:
+            t = token.lower()
+            if t.startswith("каз"):
+                return "Казах"
+            if t.startswith("арб"):
+                return "Арбуз"
+            if t.startswith("мед"):
+                return "Медведь"
+            if t.startswith("тат"):
+                return "Татарин"
+            return token
+
+        for _kid, kcontent in r:
+            # Гибкий парс: «<имя> должен <имя>(у/ом) N USDT» (N — целое или с точкой)
+            for mm in _re_in.finditer(
+                r"(Арбуз|Казах(?:у|ом)?|Медведь(?:ю)?|Татарин(?:у|ом)?)\s+должен\s+"
+                r"(Арбуз[ауы]?|Казах(?:у|ом|ах)?|Медведь(?:ю)?|Татарин(?:у|ом)?)\s+([\d.]+)\s*USDT",
+                kcontent, _re_in.IGNORECASE
+            ):
+                try:
+                    amt = float(mm.group(3))
+                except ValueError:
+                    continue
+                debtor = _normalize_partner(mm.group(1))
+                creditor = _normalize_partner(mm.group(2))
+                internal_debts.append((debtor, creditor, amt))
+
     # P&L расчёт
     assets_usdt = wallets_total_usdt + cab_usdt + rapira_debt_usdt
     liabilities_usdt = karen_debt_usdt
@@ -537,6 +573,16 @@ async def _oborotka_snapshot() -> str | None:
         parts.append(
             f"  • Наш долг Карену: {karen_debt_rub:,} ₽ ≈ {karen_debt_usdt:.2f} USDT".replace(",", " ")
         )
+
+    # Внутренние долги между партнёрами — НАПОМИНАТЬ В КАЖДОМ ОТЧЁТЕ
+    # (распоряжение владельца 08.05).
+    if internal_debts:
+        parts.append("")
+        parts.append("🔁 Внутренние долги между партнёрами:")
+        # Дательный падеж для имён партнёров.
+        DAT = {"Казах": "Казаху", "Арбуз": "Арбузу", "Медведь": "Медведю", "Татарин": "Татарину"}
+        for debtor, creditor, amt in internal_debts:
+            parts.append(f"  • {debtor} должен {DAT.get(creditor, creditor)}: {amt:.2f} USDT")
 
     parts.append("")
     parts.append("💵 Прибыль:")
