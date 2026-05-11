@@ -465,11 +465,46 @@ async def _oborotka_snapshot() -> str | None:
         cab_n, cab_usdt = r.fetchone()
         cab_usdt = float(cab_usdt)
 
-        # 4. Долги к получению (через KB или явные prepayments — пока KB)
-        # 5. Долги наши (Карен и т.д.) — суммируем по prepayments не fulfilled
-        # Для простоты — берём из KB rapira-frozen-funds и карен-pack-balance-2
+        # 4. Долг Рапиры к получению (из KB rapira-frozen-funds, парсим число)
+        r = await session.execute(_sa_text(
+            "SELECT content FROM knowledge_base WHERE key='rapira-frozen-funds' AND is_active"
+        ))
+        rapira_kb = r.scalar_one_or_none() or ""
+        # Курс пересчёта рублёвых долгов в USDT: возьмём ~79.5 (последний
+        # фактический курс конвертации, см. exchange Никонов).
+        FX_RUB_USDT = 79.5
+        rapira_debt_rub = 0
+        # Простой парс: ищем «ОСТАТОК ДОЛГА РАПИРЫ: X ₽» (case-insensitive)
+        import re as _re_in
+        m = _re_in.search(r"остаток долга рапиры[:\s]+([\d\s]+)", rapira_kb, _re_in.IGNORECASE)
+        if m:
+            try:
+                rapira_debt_rub = int(m.group(1).replace(" ", ""))
+            except ValueError:
+                rapira_debt_rub = 0
+        rapira_debt_usdt = rapira_debt_rub / FX_RUB_USDT if rapira_debt_rub else 0
 
-    # Build compact block
+        # 5. Долг наш (Карену) — из KB карен-pack-balance-2
+        r = await session.execute(_sa_text(
+            "SELECT content FROM knowledge_base WHERE key='карен-pack-balance-2' AND is_active"
+        ))
+        karen_kb = r.scalar_one_or_none() or ""
+        karen_debt_rub = 0
+        m = _re_in.search(r"долг.*?карену.*?([\d\s]+)\s*₽", karen_kb, _re_in.IGNORECASE)
+        if m:
+            try:
+                karen_debt_rub = int(m.group(1).replace(" ", ""))
+            except ValueError:
+                karen_debt_rub = 0
+        karen_debt_usdt = karen_debt_rub / FX_RUB_USDT if karen_debt_rub else 0
+
+    # P&L расчёт
+    assets_usdt = wallets_total_usdt + cab_usdt + rapira_debt_usdt
+    liabilities_usdt = karen_debt_usdt
+    pnl_book = assets_usdt - liabilities_usdt - capital
+    # Worst-case: Рапира не вернёт долг
+    pnl_no_rapira = pnl_book - rapira_debt_usdt
+
     parts = [
         "# Оборотка сберов — живой snapshot из БД",
         "Это АВТОРИТЕТНЫЙ источник по обороте. Не цитируй старые oborotka-state-* KB.",
@@ -493,10 +528,32 @@ async def _oborotka_snapshot() -> str | None:
     parts.append(f"📦 Кабинеты на складе: {cab_n} шт = {cab_usdt:.2f} USDT")
 
     parts.append("")
+    parts.append("📊 К получению / обязательства:")
+    if rapira_debt_rub:
+        parts.append(
+            f"  • Долг Рапиры (к нам): {rapira_debt_rub:,} ₽ ≈ {rapira_debt_usdt:.2f} USDT".replace(",", " ")
+        )
+    if karen_debt_rub:
+        parts.append(
+            f"  • Наш долг Карену: {karen_debt_rub:,} ₽ ≈ {karen_debt_usdt:.2f} USDT".replace(",", " ")
+        )
+
+    parts.append("")
+    parts.append("💵 Прибыль:")
     parts.append(
-        "ℹ Дополнительно (см. KB): rapira-frozen-funds (долг Рапиры ₽), "
-        "карен-pack-balance-2 (долг Карену), oborotka-state-2026-05-* "
-        "(старые — игнорировать, использовать ЭТОТ блок)."
+        f"  • Бухгалтерская (assets − liabs − capital): "
+        f"{pnl_book:+.2f} USDT"
+    )
+    parts.append(
+        f"  • Если Рапира НЕ вернёт долг: "
+        f"{pnl_no_rapira:+.2f} USDT (минус {rapira_debt_usdt:.2f} USDT)"
+    )
+
+    parts.append("")
+    parts.append(
+        "Формула: активы (кошельки + кабинеты-материал + долг Рапиры) "
+        "− обязательства (Карену) − капитал = бухгалтерская прибыль. "
+        f"Курс пересчёта ₽→USDT: {FX_RUB_USDT}."
     )
     return "\n".join(parts)
 
