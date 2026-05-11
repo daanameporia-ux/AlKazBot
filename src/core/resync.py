@@ -59,31 +59,33 @@ async def resync(bot: Bot) -> dict[int, int]:
     for r in rows:
         by_chat.setdefault(r.chat_id, []).append(r)
 
-    flush_handler = make_flush_handler(bot)
+    # ВАЖНО (08.05.2026): resync больше НЕ зовёт LLM analyze_batch.
+    # Раньше делал — и при каждом старте контейнера Railway передеплой
+    # триггерил resync → LLM видел 24ч-окно старых сообщений → плодил
+    # preview-карточки на голую интерпретацию ("Обмен 157к → 2020 USDT"
+    # из обрывка обсуждения в чате). См. инцидент 08.05 19:34 и 19:51.
+    #
+    # Теперь resync просто помечает messages.intent_detected='resync_seen'
+    # чтобы они не попали в следующий resync-проход. Реальная обработка
+    # пропущенных сообщений идёт только через явный пользовательский
+    # триггер (mention/reply/keyword) или manual /resync с явным флагом.
     triggered: dict[int, int] = {}
-    for chat_id, msgs in by_chat.items():
-        if len(msgs) < MIN_BATCH_SIZE:
-            continue
-        batch = Batch(
-            chat_id=chat_id,
-            messages=[
-                BufferedMessage(
-                    tg_message_id=m.tg_message_id or 0,
-                    tg_user_id=m.tg_user_id or 0,
-                    display_name=None,
-                    text=m.text or "",
-                    received_at=m.created_at.timestamp(),
-                )
-                for m in msgs
-            ],
-            trigger=None,
-            trigger_kind="resync",
-        )
-        try:
-            await flush_handler(batch)
+    async with session_scope() as session:
+        from sqlalchemy import update as _update
+        for chat_id, msgs in by_chat.items():
+            if len(msgs) < MIN_BATCH_SIZE:
+                continue
+            ids = [m.id for m in msgs]
+            await session.execute(
+                _update(MessageLog)
+                .where(MessageLog.id.in_(ids))
+                .where(MessageLog.intent_detected.is_(None))
+                .values(intent_detected="resync_seen")
+            )
             triggered[chat_id] = len(msgs)
-        except Exception:
-            log.exception("resync_flush_failed", chat_id=chat_id)
 
-    log.info("resync_done", chats=len(triggered), messages=sum(triggered.values()))
+    log.info("resync_marked", chats=len(triggered), messages=sum(triggered.values()))
+    # Suppress unused-import warning — make_flush_handler/BufferedMessage/Batch
+    # imports kept for /resync command which still wants real reprocess if asked.
+    _ = (make_flush_handler, Batch, BufferedMessage, bot)
     return triggered
