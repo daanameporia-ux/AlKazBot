@@ -418,6 +418,89 @@ async def _lazy_kb_for_batch(rendered: str) -> list[dict[str, Any]]:
     ]
 
 
+async def _oborotka_snapshot() -> str | None:
+    """Live snapshot of the сберы-processing financial state.
+
+    Injected into uncached tail when batch text matches «оборот / капитал /
+    кошельки / отчёт / сбер / крутк». Pulls fresh data from БД each call —
+    partner_contributions, wallet_snapshots (last per wallet), cabinets
+    в работе/складе, prepayments — and renders compact block.
+
+    Это замена устаревшему KB-факту oborotka-state-* — он застывал на дату
+    создания, а команда меняет цифры. Теперь живая БД авторитетна.
+    """
+    from sqlalchemy import text as _sa_text
+
+    async with session_scope() as session:
+        # 1. Капитал партнёров
+        r = await session.execute(_sa_text("""
+            SELECT p.name, COALESCE(SUM(pc.amount_usdt),0) AS u
+            FROM partners p LEFT JOIN partner_contributions pc ON pc.partner_id=p.id
+            WHERE p.is_active GROUP BY p.id, p.name ORDER BY p.id
+        """))
+        partners = [(row[0], float(row[1])) for row in r if float(row[1]) > 0]
+        capital = sum(u for _, u in partners)
+
+        # 2. Кошельки (последний snapshot)
+        r = await session.execute(_sa_text("""
+            SELECT w.code, w.currency, ws.amount_native, ws.amount_usdt, ws.snapshot_time
+            FROM wallets w LEFT JOIN LATERAL (
+                SELECT amount_native, amount_usdt, snapshot_time FROM wallet_snapshots
+                WHERE wallet_id=w.id ORDER BY snapshot_time DESC LIMIT 1
+            ) ws ON true WHERE w.is_active ORDER BY w.id
+        """))
+        wallets = []
+        wallets_total_usdt = 0.0
+        for row in r:
+            code, curr, native, usdt, _ts = row
+            u = float(usdt or 0)
+            wallets_total_usdt += u
+            wallets.append((code, curr, float(native or 0), u))
+
+        # 3. Кабинеты на складе
+        r = await session.execute(_sa_text("""
+            SELECT count(*), COALESCE(SUM(cost_usdt),0)
+            FROM cabinets WHERE status='in_stock'
+        """))
+        cab_n, cab_usdt = r.fetchone()
+        cab_usdt = float(cab_usdt)
+
+        # 4. Долги к получению (через KB или явные prepayments — пока KB)
+        # 5. Долги наши (Карен и т.д.) — суммируем по prepayments не fulfilled
+        # Для простоты — берём из KB rapira-frozen-funds и карен-pack-balance-2
+
+    # Build compact block
+    parts = [
+        "# Оборотка сберов — живой snapshot из БД",
+        "Это АВТОРИТЕТНЫЙ источник по обороте. Не цитируй старые oborotka-state-* KB.",
+        "",
+        f"💼 Капитал партнёров: {capital:.2f} USDT",
+    ]
+    for name, u in partners:
+        parts.append(f"  • {name}: {u:.2f} USDT")
+
+    parts.append("")
+    parts.append(f"💰 Кошельки (итого {wallets_total_usdt:.2f} USDT):")
+    for code, curr, native, usdt in wallets:
+        if usdt == 0:
+            parts.append(f"  • {code}: 0 (пусто)")
+        elif curr == "USDT":
+            parts.append(f"  • {code}: {usdt:.2f} USDT")
+        else:
+            parts.append(f"  • {code}: {native} {curr} (~{usdt:.2f} USDT)")
+
+    parts.append("")
+    parts.append(f"📦 Кабинеты на складе: {cab_n} шт = {cab_usdt:.2f} USDT")
+
+    parts.append("")
+    parts.append(
+        "ℹ Дополнительно (см. KB): rapira-frozen-funds (долг Рапиры ₽), "
+        "карен-pack-balance-2 (долг Карену), oborotka-state-2026-05-* "
+        "(старые — игнорировать, использовать ЭТОТ блок)."
+    )
+    return "\n".join(parts)
+
+
 async def _poa_snapshot(rendered: str = "") -> str | None:
     """Render a fresh snapshot of POA-clients with status + last balance.
 
@@ -567,6 +650,37 @@ def _needs_sticker_examples(batch: Batch, rendered: str) -> bool:
     # Detect any sticker placeholder in the rendered batch (means bot has
     # something to learn from this turn).
     return "[sticker " in lo or "[стикер " in lo
+
+
+def _needs_oborotka_snapshot(rendered: str) -> bool:
+    """Decide if oborotka (RUB→USDT processing) snapshot is worth injecting.
+
+    Triggers on requests about overall financial state of the processing
+    side (wallets, capital, cabinets, P&L). NOT triggered just on POA
+    keywords — POA has its own dedicated snapshot.
+    """
+    lo = rendered.lower()
+    return any(
+        token in lo
+        for token in (
+            "оборот",       # оборотка, обороты
+            "капитал",
+            "кошел",        # кошельки
+            "wallet",
+            "обмен",
+            "отчёт",
+            "отчет",
+            "сбер",         # сберы / по сберам / крутка сберов
+            "крутк",
+            "tap",
+            "merc",
+            "rapira",
+            "рапир",
+            "матери",       # материал
+            "склад",        # на складе
+            "tappay",       # tapbank pay
+        )
+    )
 
 
 def _needs_poa_snapshot(rendered: str) -> bool:
@@ -788,6 +902,13 @@ async def analyze_batch(
         await _poa_snapshot(rendered) if _needs_poa_snapshot(rendered) else None
     )
 
+    # Live oborotka snapshot — financial state of сберы-processing direction
+    # (capital, wallets, cabinets). Same idea as POA snapshot but for the
+    # other business direction. Заменяет устаревшие KB-facts oborotka-state-*.
+    oborotka_snapshot = (
+        await _oborotka_snapshot() if _needs_oborotka_snapshot(rendered) else None
+    )
+
     # Lazy KB facts: pull only the справочные records whose key/content
     # actually matches the current batch text. Cached KB block holds only
     # the kernel set (always_inject=true) — see kb_repo.list_facts(only_kernel)
@@ -803,6 +924,7 @@ async def analyze_batch(
         sticker_described_catalog=sticker_catalog,
         sticker_usage_examples=sticker_examples,
         poa_snapshot=poa_snapshot,
+        oborotka_snapshot=oborotka_snapshot,
         lazy_kb_facts=lazy_kb,
         recent_messages=recent_history or None,
         analyzer_instructions=BATCH_INSTRUCTION,

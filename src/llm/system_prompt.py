@@ -434,6 +434,7 @@ def build_system_blocks(
     ] | None = None,
     sticker_usage_examples: list[dict[str, Any]] | None = None,
     poa_snapshot: str | None = None,
+    oborotka_snapshot: str | None = None,
     recent_messages: str | None = None,
     analyzer_instructions: str | None = None,
     lazy_kb_facts: list[dict[str, Any]] | None = None,
@@ -502,6 +503,8 @@ def build_system_blocks(
     tail_parts: list[str] = []
     if poa_snapshot:
         tail_parts.append(poa_snapshot)
+    if oborotka_snapshot:
+        tail_parts.append(oborotka_snapshot)
     if lazy_kb_facts:
         tail_parts.append(render_lazy_kb(lazy_kb_facts))
     if sticker_usage_examples:
