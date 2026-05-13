@@ -457,13 +457,17 @@ async def _oborotka_snapshot() -> str | None:
             wallets_total_usdt += u
             wallets.append((code, curr, float(native or 0), u))
 
-        # 3. Кабинеты на складе
+        # 3. Кабинеты на складе — с разбивкой по has_doverka и именами
         r = await session.execute(_sa_text("""
-            SELECT count(*), COALESCE(SUM(cost_usdt),0)
+            SELECT id, name, cost_usdt, has_doverka
             FROM cabinets WHERE status='in_stock'
+            ORDER BY has_doverka DESC, cost_usdt DESC, id
         """))
-        cab_n, cab_usdt = r.fetchone()
-        cab_usdt = float(cab_usdt)
+        cabinets_rows = list(r.all())
+        cab_n = len(cabinets_rows)
+        cab_usdt = float(sum(row[2] or 0 for row in cabinets_rows))
+        cabs_with = [(row[0], row[1], float(row[2] or 0)) for row in cabinets_rows if row[3]]
+        cabs_without = [(row[0], row[1], float(row[2] or 0)) for row in cabinets_rows if not row[3]]
 
         # 4. Долг Рапиры к получению (из KB rapira-frozen-funds, парсим число)
         r = await session.execute(_sa_text(
@@ -561,7 +565,18 @@ async def _oborotka_snapshot() -> str | None:
             parts.append(f"  • {code}: {native} {curr} (~{usdt:.2f} USDT)")
 
     parts.append("")
-    parts.append(f"📦 Кабинеты на складе: {cab_n} шт = {cab_usdt:.2f} USDT")
+    parts.append(
+        f"📦 Кабинеты на складе: {cab_n} шт = {cab_usdt:.2f} USDT "
+        f"(с доверкой {len(cabs_with)}, без {len(cabs_without)})"
+    )
+    if cabs_with:
+        parts.append(f"  С доверкой ({len(cabs_with)}):")
+        for cid, nm, cu in cabs_with:
+            parts.append(f"    • id={cid} {nm or '?'} — {cu:.2f} USDT")
+    if cabs_without:
+        parts.append(f"  Без доверки ({len(cabs_without)}):")
+        for cid, nm, cu in cabs_without:
+            parts.append(f"    • id={cid} {nm or '?'} — {cu:.2f} USDT")
 
     parts.append("")
     parts.append("📊 К получению / обязательства:")
@@ -782,6 +797,9 @@ def _needs_oborotka_snapshot(rendered: str) -> bool:
             "матери",       # материал
             "склад",        # на складе
             "tappay",       # tapbank pay
+            "кабинет",      # «какие кабинеты», «склад кабинетов»
+            "/stock",       # команда /stock
+            "довер",        # «с доверкой / без доверки»
         )
     )
 
