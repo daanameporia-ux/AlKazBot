@@ -457,17 +457,25 @@ async def _oborotka_snapshot() -> str | None:
             wallets_total_usdt += u
             wallets.append((code, curr, float(native or 0), u))
 
-        # 3. Кабинеты на складе — с разбивкой по has_doverka и именами
+        # 3. Кабинеты на складе — с разбивкой по has_doverka и именами,
+        # и cost_rub, и cost_usdt (юзер просит и в рублях, и в USDT)
         r = await session.execute(_sa_text("""
-            SELECT id, name, cost_usdt, has_doverka
+            SELECT id, name, cost_rub, cost_usdt, has_doverka
             FROM cabinets WHERE status='in_stock'
             ORDER BY has_doverka DESC, cost_usdt DESC, id
         """))
         cabinets_rows = list(r.all())
         cab_n = len(cabinets_rows)
-        cab_usdt = float(sum(row[2] or 0 for row in cabinets_rows))
-        cabs_with = [(row[0], row[1], float(row[2] or 0)) for row in cabinets_rows if row[3]]
-        cabs_without = [(row[0], row[1], float(row[2] or 0)) for row in cabinets_rows if not row[3]]
+        cab_rub = float(sum(row[2] or 0 for row in cabinets_rows))
+        cab_usdt = float(sum(row[3] or 0 for row in cabinets_rows))
+        cabs_with = [
+            (row[0], row[1], float(row[2] or 0), float(row[3] or 0))
+            for row in cabinets_rows if row[4]
+        ]
+        cabs_without = [
+            (row[0], row[1], float(row[2] or 0), float(row[3] or 0))
+            for row in cabinets_rows if not row[4]
+        ]
 
         # 4. Долг Рапиры к получению (из KB rapira-frozen-funds, парсим число)
         r = await session.execute(_sa_text(
@@ -565,18 +573,24 @@ async def _oborotka_snapshot() -> str | None:
             parts.append(f"  • {code}: {native} {curr} (~{usdt:.2f} USDT)")
 
     parts.append("")
+    cab_rub_fmt = f"{int(cab_rub):,}".replace(",", " ")
     parts.append(
-        f"📦 Кабинеты на складе: {cab_n} шт = {cab_usdt:.2f} USDT "
+        f"📦 Кабинеты на складе: {cab_n} шт = "
+        f"{cab_rub_fmt} ₽ / {cab_usdt:.2f} USDT "
         f"(с доверкой {len(cabs_with)}, без {len(cabs_without)})"
     )
     if cabs_with:
         parts.append(f"  С доверкой ({len(cabs_with)}):")
-        for cid, nm, cu in cabs_with:
-            parts.append(f"    • id={cid} {nm or '?'} — {cu:.2f} USDT")
+        for cid, nm, cr, cu in cabs_with:
+            parts.append(
+                f"    • id={cid} {nm or '?'} — {int(cr):,} ₽ / {cu:.2f} USDT".replace(",", " ")
+            )
     if cabs_without:
         parts.append(f"  Без доверки ({len(cabs_without)}):")
-        for cid, nm, cu in cabs_without:
-            parts.append(f"    • id={cid} {nm or '?'} — {cu:.2f} USDT")
+        for cid, nm, cr, cu in cabs_without:
+            parts.append(
+                f"    • id={cid} {nm or '?'} — {int(cr):,} ₽ / {cu:.2f} USDT".replace(",", " ")
+            )
 
     parts.append("")
     parts.append("📊 К получению / обязательства:")
